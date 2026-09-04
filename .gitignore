@@ -1,0 +1,9 @@
+node_modules/
+data/db.json
+data/*.corrupt.*
+uploads/photos/*
+uploads/files/*
+!uploads/photos/.gitkeep
+!uploads/files/.gitkeep
+*.log
+.DS_Store
