@@ -257,6 +257,7 @@ a { color: inherit; }
 .field-input input::placeholder { color: var(--text-faint); }
 
 .field-foot { display: flex; justify-content: flex-end; margin: -4px 0 18px; }
+.field-foot[hidden] { display: none; }
 .field-foot a { font-size: 12px; color: var(--text-muted); text-decoration: none; }
 .field-foot a:hover { color: var(--cyan); }
 
@@ -457,6 +458,45 @@ h1 {
   margin: 12px 2px 0; font-size: 11.5px; color: var(--gold);
   display: flex; align-items: center; gap: 6px;
 }
+.save-hint[hidden] { display: none; } /* an explicit `display` on a [hidden] element otherwise wins the cascade */
+
+/* ---------- chat log (console talks to a real Claude agent — server/chat.js) ---------- */
+
+.chat-log {
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 360px; overflow-y: auto;
+}
+.chat-log[hidden] { display: none; }
+
+.chat-msg { display: flex; }
+.chat-msg.user { justify-content: flex-end; }
+.chat-msg.assistant { justify-content: flex-start; }
+
+.chat-bubble {
+  max-width: 82%; padding: 10px 14px; border-radius: 16px;
+  font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+}
+
+.chat-msg.user .chat-bubble {
+  background: linear-gradient(135deg, var(--violet), var(--magenta)); color: #fff; border-bottom-right-radius: 4px;
+}
+
+.chat-msg.assistant .chat-bubble {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border); color: var(--text); border-bottom-left-radius: 4px;
+}
+
+.chat-typing { display: inline-flex; gap: 4px; padding: 12px 14px; }
+.chat-typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); animation: chatBounce 1.2s infinite ease-in-out; }
+.chat-typing span:nth-child(2) { animation-delay: 0.15s; }
+.chat-typing span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes chatBounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) { .chat-typing span { animation: none; opacity: 0.8; } }
 
 .console-text {
   flex: 1; min-width: 0; width: 100%; font-size: 15.5px; color: var(--text);

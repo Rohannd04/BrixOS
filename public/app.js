@@ -157,6 +157,7 @@
   var generateBtn = $('generateBtn');
   var previewBody = $('previewBody');
   var previewMeta = $('previewMeta');
+  var chatLog = $('chatLog');
   var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
 
   var openFieldId = null; // which text-field accordion is expanded in the popover
@@ -576,47 +577,95 @@
   }
 
   // ===========================================================================
-  // console input: type + Enter (or send) to run a scan; chips fill the input
+  // console input: a real chat with the BrixOS agent (server/chat.js) — type
+  // + Enter (or hit send). Chips below just fill the input; Enter sends it.
   // ===========================================================================
 
-  function runScan() {
-    var value = consoleInput.value.trim();
-    if (!value) return;
+  var chatHistory = []; // {role, content} pairs, client-side only — not persisted across reloads
+  var chatBusy = false;
 
-    var prevText = scoreStatus.textContent;
-    scoreStatus.textContent = 'Scanning “' + value + '”…';
-    consoleInput.value = '';
-    sendBtn.disabled = true;
-
-    var finish = function () {
-      sendBtn.disabled = false;
-      renderScoreUI();
-    };
-
-    if (!state.profile.business) {
-      if (state.authed) {
-        api('/api/profile/business', { method: 'PUT', body: { value: value.length > 120 ? value.slice(0, 120) : value } })
-          .then(function (data) {
-            state.profile = data.profile; state.score = data.score;
-            renderPopover(); renderChips();
-            setTimeout(finish, 900);
-          })
-          .catch(function () { setTimeout(finish, 900); });
-        return;
-      }
-      var check = validateLocal('business', value.length > 120 ? value.slice(0, 120) : value);
-      if (check.ok) {
-        state.profile.business = check.value;
-        state.score = computeLocalScores(state.profile);
-        renderPopover(); renderChips();
-      }
-    }
-    setTimeout(finish, 900);
+  function appendChatBubble(role, text) {
+    chatLog.hidden = false;
+    var row = document.createElement('div');
+    row.className = 'chat-msg ' + role;
+    var bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    chatLog.appendChild(row);
+    chatLog.scrollTop = chatLog.scrollHeight;
+    return bubble;
   }
 
-  sendBtn.addEventListener('click', runScan);
+  function showTyping() {
+    chatLog.hidden = false;
+    var row = document.createElement('div');
+    row.className = 'chat-msg assistant';
+    row.id = 'chatTypingRow';
+    row.innerHTML = '<div class="chat-bubble chat-typing"><span></span><span></span><span></span></div>';
+    chatLog.appendChild(row);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function hideTyping() {
+    var row = $('chatTypingRow');
+    if (row) row.remove();
+  }
+
+  // reveals the reply progressively, like ChatGPT/Claude's own chat does,
+  // instead of the real (slower, trickier-to-stream-around-tool-calls) thing
+  function typewriteBubble(bubble, text) {
+    var i = 0;
+    var step = Math.max(1, Math.round(text.length / 200));
+    (function tick() {
+      i += step;
+      bubble.textContent = text.slice(0, i);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      if (i < text.length) setTimeout(tick, 14);
+    })();
+  }
+
+  function sendChatMessage() {
+    var value = consoleInput.value.trim();
+    if (!value || chatBusy) return;
+
+    if (!state.authed) {
+      toast('Sign in so BrixOS can chat with you and save what you share.', true);
+      openAuthModal('login');
+      return;
+    }
+
+    consoleInput.value = '';
+    appendChatBubble('user', value);
+    showTyping();
+    chatBusy = true;
+    sendBtn.disabled = true;
+
+    api('/api/chat', { method: 'POST', body: { message: value, history: chatHistory.slice(-12) } })
+      .then(function (data) {
+        hideTyping();
+        chatHistory.push({ role: 'user', content: value });
+        chatHistory.push({ role: 'assistant', content: data.reply });
+        typewriteBubble(appendChatBubble('assistant', ''), data.reply || '…');
+
+        state.profile = data.profile;
+        state.score = data.score;
+        renderPopover(); renderChips(); renderScoreUI();
+        if (data.generated) toast('Your rebuilt site is ready — check the preview panel.');
+      })
+      .catch(function (err) {
+        hideTyping();
+        appendChatBubble('assistant', err.message || 'Something went wrong — try again.');
+      })
+      .finally(function () {
+        chatBusy = false;
+        sendBtn.disabled = false;
+      });
+  }
+
+  sendBtn.addEventListener('click', sendChatMessage);
   consoleInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); runScan(); }
+    if (e.key === 'Enter') { e.preventDefault(); sendChatMessage(); }
   });
 
   // ===========================================================================

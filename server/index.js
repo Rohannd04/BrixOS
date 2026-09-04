@@ -13,6 +13,7 @@ const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS, validateEmail, validatePassword, validateName } = require('./validate');
 const generate = require('./generate');
+const chat = require('./chat');
 
 const PORT = process.env.PORT || 3000;
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
@@ -288,6 +289,43 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
       return res.status(503).json({ error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY in your .env file.' });
     }
     res.status(502).json({ error: 'Generation failed — the AI service returned an error. Try again in a moment.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// chat — the console at the top talks to a real Claude agent (see server/chat.js)
+// ---------------------------------------------------------------------------
+
+const chatLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many messages. Slow down a little and try again.' }
+});
+
+app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
+  if (!chat.isConfigured()) {
+    return res.status(503).json({
+      error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY in a .env file (see .env.example) and restart the server.'
+    });
+  }
+
+  const message = String((req.body || {}).message || '').trim();
+  if (!message) return res.status(400).json({ error: 'Say something first.' });
+  if (message.length > 2000) return res.status(400).json({ error: 'That message is a bit long — try trimming it.' });
+
+  const history = Array.isArray((req.body || {}).history) ? req.body.history.slice(-12) : [];
+
+  try {
+    const result = await chat.sendMessage(message, history, req.session.userId);
+    res.json(result);
+  } catch (err) {
+    console.error('chat failed:', err);
+    if (err.message === 'NOT_CONFIGURED') {
+      return res.status(503).json({ error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY in your .env file.' });
+    }
+    res.status(502).json({ error: 'Chat failed — the AI service returned an error. Try again in a moment.' });
   }
 });
 

@@ -36,11 +36,12 @@ server/
                mirrored (read-only) in public/app.js for the signed-out demo
   validate.js  Format-only validation for every profile field
   generate.js  The site-generation agent pipeline (see below)
+  chat.js      The console's chat agent (see below)
 public/
   index.html   Markup
   styles.css   All styling
   app.js       All client-side behavior — auth, the "+" menu, uploads,
-               the live score card, the generated-site preview
+               the live score card, the generated-site preview, chat
 uploads/       Where uploaded photos/files actually land
 data/          Where db.json lives
 ```
@@ -78,6 +79,36 @@ independently overridable via `BRIXOS_PLANNER_MODEL` / `BRIXOS_BUILDER_MODEL`
 ever fails with a "model not found" error, that's the one line to update;
 check https://docs.claude.com/en/docs/about-claude/models for the current
 identifier.
+
+## Chat — a third agent, at the console
+
+The console at the top of the page (type + Enter, or click one of the
+example chips) is a real chat with a Claude agent, not a script — it calls
+`POST /api/chat` (`server/chat.js`), which is a genuine back-and-forth with
+the Anthropic API, same as talking to Claude or ChatGPT directly. It shares
+`ANTHROPIC_API_KEY` with the generation pipeline, so nothing extra to
+configure once that's set — and no new dependency either, it reuses the
+`@anthropic-ai/sdk` package the Planner/Builder pipeline already added.
+
+It's a third agent, separate from Planner/Builder, and it can *act*, not
+just talk — it has two tools:
+
+- `save_profile_field` — the same format-only checks as the "+" menu
+  (`server/validate.js`). Tell it "my instagram is instagram.com/yourstore"
+  in plain conversation and it saves it exactly like pasting it in the
+  popover would.
+- `generate_site` — runs the same Planner → Builder pipeline as the button.
+  Ask it to "build my site" and it does, using whatever's already on your
+  profile — the result shows up in the preview panel exactly like clicking
+  the button.
+
+Replies stream into the chat log as bubbles and type themselves out — the
+typing effect is a client-side reveal of the finished reply (real
+token-by-token streaming through a tool-calling loop is a lot more moving
+parts for a prototype; this gets the same feel with far less to break).
+Chat history is kept in the browser only, for the current page load — it's
+not saved to your profile, so it starts fresh on reload (the profile fields
+and generated site it produces along the way *are* saved, as always).
 
 ## What's real vs. what's a placeholder
 
