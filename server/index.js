@@ -1,3 +1,5 @@
+require('dotenv').config({ quiet: true }); // suppress dotenv's console banner
+
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -10,6 +12,7 @@ const rateLimit = require('express-rate-limit');
 const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS, validateEmail, validatePassword, validateName } = require('./validate');
+const generate = require('./generate');
 
 const PORT = process.env.PORT || 3000;
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
@@ -240,6 +243,53 @@ function handleDeleteUpload(kind) {
 
 app.delete('/api/profile/photos/:id', requireAuth, handleDeleteUpload('photos'));
 app.delete('/api/profile/files/:id', requireAuth, handleDeleteUpload('files'));
+
+// ---------------------------------------------------------------------------
+// site generation (Planner -> Builder agent pipeline, see server/generate.js)
+// ---------------------------------------------------------------------------
+
+// generation calls a paid external API and can take a while — keep it modest
+const generateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many generation requests this hour. Try again later.' }
+});
+
+app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
+  if (!generate.isConfigured()) {
+    return res.status(503).json({
+      error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY in a .env file (see .env.example) and restart the server.'
+    });
+  }
+
+  const db = readDB();
+  const profile = getProfile(db, req.session.userId);
+  const score = computeScores(profile);
+
+  try {
+    const plan = await generate.planSite(profile, score);
+    const html = await generate.buildSite(plan, profile);
+
+    profile.generatedSite = {
+      plan,
+      html,
+      generatedAt: new Date().toISOString(),
+      plannerModel: generate.PLANNER_MODEL,
+      builderModel: generate.BUILDER_MODEL
+    };
+    writeDB(db);
+
+    res.json(profilePayload(profile));
+  } catch (err) {
+    console.error('generation failed:', err);
+    if (err.message === 'NOT_CONFIGURED') {
+      return res.status(503).json({ error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY in your .env file.' });
+    }
+    res.status(502).json({ error: 'Generation failed — the AI service returned an error. Try again in a moment.' });
+  }
+});
 
 // ---------------------------------------------------------------------------
 

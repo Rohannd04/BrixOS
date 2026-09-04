@@ -169,14 +169,14 @@
     <div class="card">
       <div class="card-head">
         <h2 class="display">Generated preview</h2>
-        <span class="mono">v2 &middot; draft</span>
+        <button class="generate-btn mono" id="generateBtn" type="button">Generate my site</button>
       </div>
       <div class="browser">
         <div class="browser-bar">
           <span class="dot-sm"></span><span class="dot-sm"></span><span class="dot-sm"></span>
           <div class="browser-url mono" id="previewUrl">aurora-boutique.brixos.site</div>
         </div>
-        <div class="browser-body">
+        <div class="browser-body" id="previewBody">
           <div class="mock-hero"></div>
           <div class="mock-grid">
             <div class="mock-card"><div class="thumb"></div><div class="mock-line" style="width:70%"></div><div class="price">$48</div></div>
@@ -185,6 +185,7 @@
           </div>
         </div>
       </div>
+      <p class="preview-meta mono" id="previewMeta" hidden></p>
     </div>
   </div>
 

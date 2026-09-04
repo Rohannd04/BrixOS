@@ -154,6 +154,10 @@
   var scanBadge = $('scanBadge');
   var previewUrl = $('previewUrl');
   var heroSub = $('heroSub');
+  var generateBtn = $('generateBtn');
+  var previewBody = $('previewBody');
+  var previewMeta = $('previewMeta');
+  var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
 
   var openFieldId = null; // which text-field accordion is expanded in the popover
 
@@ -528,6 +532,47 @@
       var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'yourstore';
       previewUrl.textContent = slug + '.brixos.site';
     }
+
+    renderPreview();
+  }
+
+  // ===========================================================================
+  // render: the "Generated preview" panel — either the static mock, or the
+  // real HTML the BrixOS Planner -> Builder agent pipeline produced
+  // ===========================================================================
+
+  function timeAgo(iso) {
+    var ms = Date.now() - new Date(iso).getTime();
+    var mins = Math.round(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    return Math.round(hrs / 24) + 'd ago';
+  }
+
+  function renderPreview() {
+    var site = state.profile && state.profile.generatedSite;
+
+    if (!site) {
+      previewBody.classList.remove('is-generated');
+      previewBody.innerHTML = previewBodyDefaultHTML;
+      previewMeta.hidden = true;
+      return;
+    }
+
+    previewBody.classList.add('is-generated');
+    previewBody.innerHTML = '';
+    var frame = document.createElement('iframe');
+    frame.className = 'preview-frame';
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('title', (state.profile.business || 'Generated') + ' — BrixOS preview');
+    frame.srcdoc = site.html;
+    previewBody.appendChild(frame);
+
+    previewMeta.hidden = false;
+    previewMeta.textContent = 'Generated ' + timeAgo(site.generatedAt) +
+      (site.plan && site.plan.siteName ? ' · plan: ' + site.plan.siteName : '');
   }
 
   // ===========================================================================
@@ -573,6 +618,42 @@
   consoleInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); runScan(); }
   });
+
+  // ===========================================================================
+  // "Generate my site" — calls the Planner -> Builder pipeline on the server
+  // ===========================================================================
+
+  function generateSite() {
+    if (!state.authed) {
+      toast('Sign in so BrixOS can save the site it generates for you.', true);
+      openAuthModal('login');
+      return;
+    }
+    if (generateBtn.disabled) return;
+
+    var prevLabel = generateBtn.textContent;
+    generateBtn.disabled = true;
+    generateBtn.textContent = 'Generating…';
+    previewBody.classList.add('is-loading');
+
+    api('/api/generate', { method: 'POST' })
+      .then(function (data) {
+        state.profile = data.profile;
+        state.score = data.score;
+        renderScoreUI();
+        toast('Your rebuilt site is ready.');
+      })
+      .catch(function (err) {
+        toast(err.message, true);
+      })
+      .finally(function () {
+        generateBtn.disabled = false;
+        generateBtn.textContent = prevLabel;
+        previewBody.classList.remove('is-loading');
+      });
+  }
+
+  generateBtn.addEventListener('click', generateSite);
 
   Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (chip) {
     chip.addEventListener('click', function () {

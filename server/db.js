@@ -49,7 +49,8 @@ function emptyProfile() {
     map: '',
     gmail: '',
     photos: [],
-    files: []
+    files: [],
+    generatedSite: null // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
   };
 }
 
