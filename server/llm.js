@@ -90,9 +90,17 @@ function supportsTools(m) {
 }
 
 async function fetchOpenRouterModelList() {
-  const res = await fetch('https://openrouter.ai/api/v1/models', {
-    headers: OPENROUTER_KEY ? { Authorization: `Bearer ${OPENROUTER_KEY}` } : {}
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  let res;
+  try {
+    res = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: OPENROUTER_KEY ? { Authorization: `Bearer ${OPENROUTER_KEY}` } : {},
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error('OPENROUTER_MODELS_FETCH_FAILED_' + res.status);
   const data = await res.json();
   return Array.isArray(data.data) ? data.data : [];
@@ -170,6 +178,12 @@ function safeParseJson(s) {
   try { return JSON.parse(s || '{}'); } catch (err) { return {}; }
 }
 
+// Free-tier models can be slow, rate-limited, or just hang — without a
+// timeout, a single unresponsive model would leave a request stuck
+// forever instead of failing over to the next candidate (discovered live:
+// a request sat waiting on one free model for minutes with no error).
+const OPENROUTER_TIMEOUT_MS = 25000;
+
 async function callOpenRouter({ model, system, messages, tools, forceToolName, maxTokens }) {
   const body = {
     model,
@@ -179,18 +193,29 @@ async function callOpenRouter({ model, system, messages, tools, forceToolName, m
   if (tools) body.tools = toOpenAiTools(tools);
   if (forceToolName) body.tool_choice = { type: 'function', function: { name: forceToolName } };
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_KEY}`,
-      'Content-Type': 'application/json',
-      // OpenRouter asks for these on every request — cosmetic (shows up in
-      // their own dashboard), not functionally required, but good practice.
-      'HTTP-Referer': 'https://brixos.local',
-      'X-Title': 'BrixOS Presence Engine'
-    },
-    body: JSON.stringify(body)
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_KEY}`,
+        'Content-Type': 'application/json',
+        // OpenRouter asks for these on every request — cosmetic (shows up in
+        // their own dashboard), not functionally required, but good practice.
+        'HTTP-Referer': 'https://brixos.local',
+        'X-Title': 'BrixOS Presence Engine'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`OPENROUTER_ERROR: timed out after ${OPENROUTER_TIMEOUT_MS / 1000}s`);
+    throw new Error('OPENROUTER_ERROR: ' + err.message);
+  } finally {
+    clearTimeout(timer);
+  }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
