@@ -21,6 +21,17 @@ const PORT = process.env.PORT || 3000;
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
 const SESSION_SECRET = process.env.SESSION_SECRET || 'brixos-dev-secret-change-me';
 
+// Turns a caught provider error into a short, safe-to-show suffix for an
+// API error response. Never includes the API key (nothing we throw ever
+// puts it in err.message) — just whatever OpenRouter/Anthropic actually
+// said, so a failure is diagnosable from the browser instead of needing
+// the server's own terminal output.
+function errDetail(err) {
+  const raw = String((err && err.message) || '').replace(/^OPENROUTER_ERROR:\s*/, '');
+  if (!raw) return '';
+  return ' (' + raw.slice(0, 220) + ')';
+}
+
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json());
@@ -325,7 +336,7 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
     if (err.message === 'NOT_CONFIGURED') {
       return res.status(503).json({ error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your .env file.' });
     }
-    res.status(502).json({ error: 'Generation failed — the AI service returned an error. Try again in a moment.' });
+    res.status(502).json({ error: 'Generation failed — the AI service returned an error.' + errDetail(err) + ' Try again in a moment.' });
   }
 });
 
@@ -371,7 +382,7 @@ app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
     if (err.message === 'NOT_CONFIGURED') {
       return res.status(503).json({ error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your .env file.' });
     }
-    res.status(502).json({ error: 'Chat failed — the AI service returned an error. Try again in a moment.' });
+    res.status(502).json({ error: 'Chat failed — the AI service returned an error.' + errDetail(err) + ' Try again in a moment.' });
   }
 });
 
