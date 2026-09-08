@@ -90,19 +90,21 @@ function supportsTools(m) {
 }
 
 async function fetchOpenRouterModelList() {
+  // See the matching comment in callOpenRouter: the abort has to stay
+  // armed through the body read too, not just until fetch() resolves.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
-  let res;
+  let data;
   try {
-    res = await fetch('https://openrouter.ai/api/v1/models', {
+    const res = await fetch('https://openrouter.ai/api/v1/models', {
       headers: OPENROUTER_KEY ? { Authorization: `Bearer ${OPENROUTER_KEY}` } : {},
       signal: controller.signal
     });
+    if (!res.ok) throw new Error('OPENROUTER_MODELS_FETCH_FAILED_' + res.status);
+    data = await res.json();
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) throw new Error('OPENROUTER_MODELS_FETCH_FAILED_' + res.status);
-  const data = await res.json();
   return Array.isArray(data.data) ? data.data : [];
 }
 
@@ -193,11 +195,16 @@ async function callOpenRouter({ model, system, messages, tools, forceToolName, m
   if (tools) body.tools = toOpenAiTools(tools);
   if (forceToolName) body.tool_choice = { type: 'function', function: { name: forceToolName } };
 
+  // The abort must stay armed through BOTH the fetch() call and the body
+  // read that follows — clearing it as soon as fetch() resolves (headers
+  // received) left a real gap: a response that stalls while streaming its
+  // body would hang res.json() forever with no timeout protecting it,
+  // exactly what happened in production (a request sat stuck for minutes
+  // even with a timeout that only covered the first half of the call).
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-  let res;
   try {
-    res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${OPENROUTER_KEY}`,
@@ -210,19 +217,19 @@ async function callOpenRouter({ model, system, messages, tools, forceToolName, m
       body: JSON.stringify(body),
       signal: controller.signal
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
+      throw new Error('OPENROUTER_ERROR: ' + msg);
+    }
+    return data;
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`OPENROUTER_ERROR: timed out after ${OPENROUTER_TIMEOUT_MS / 1000}s`);
+    if (err.message && err.message.startsWith('OPENROUTER_ERROR:')) throw err;
     throw new Error('OPENROUTER_ERROR: ' + err.message);
   } finally {
     clearTimeout(timer);
   }
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
-    throw new Error('OPENROUTER_ERROR: ' + msg);
-  }
-  return data;
 }
 
 // Wraps callOpenRouter with fallback across candidates: some free models
