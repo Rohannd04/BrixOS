@@ -117,7 +117,8 @@
     authed: false,
     profile: null,
     score: null,
-    aiConfigured: true // optimistic default until /api/auth/me says otherwise
+    aiConfigured: true, // optimistic default until /api/auth/me says otherwise
+    aiProvider: null // 'anthropic' | 'openrouter' | null, from /api/auth/me
   };
 
   function demoProfile() {
@@ -162,12 +163,15 @@
   var engineMode = $('engineMode');
   var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
 
-  // topbar status pill: "ONLINE" once ANTHROPIC_API_KEY is set on the server;
-  // "LOCAL MODE" when the chat/generate agents are running on the rule-based
-  // fallback instead of a real model call (see server/chat.js, server/generate.js)
+  // topbar status pill: "ONLINE" once a real model provider (Anthropic or
+  // OpenRouter — see server/llm.js) is configured on the server; "LOCAL MODE"
+  // when the chat/generate agents are running on the rule-based fallback
+  // instead. Shows which provider when it's not the default Anthropic, so
+  // it's obvious at a glance which one actually answered.
   function renderEngineStatus() {
     if (!engineMode) return;
-    engineMode.textContent = state.aiConfigured ? 'ONLINE' : 'LOCAL MODE';
+    if (!state.aiConfigured) { engineMode.textContent = 'LOCAL MODE'; return; }
+    engineMode.textContent = state.aiProvider === 'openrouter' ? 'ONLINE · OPENROUTER' : 'ONLINE';
   }
 
   var openFieldId = null; // which text-field accordion is expanded in the popover
@@ -914,6 +918,7 @@
   function boot() {
     api('/api/auth/me').then(function (data) {
       state.aiConfigured = Boolean(data.aiConfigured);
+      state.aiProvider = data.aiProvider || null;
       renderEngineStatus();
       if (data.user) {
         state.authed = true;

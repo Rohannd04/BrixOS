@@ -14,6 +14,7 @@ const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS, validateEmail, validatePassword, validateName } = require('./validate');
 const generate = require('./generate');
 const chat = require('./chat');
+const llm = require('./llm');
 const { auditWebsite, auditImprovements } = require('./audit');
 
 const PORT = process.env.PORT || 3000;
@@ -158,11 +159,12 @@ app.post('/api/auth/logout', (req, res) => {
 
 app.get('/api/auth/me', (req, res) => {
   const aiConfigured = generate.isConfigured();
-  if (!req.session.userId) return res.json({ user: null, aiConfigured });
+  const aiProvider = llm.providerName(); // 'anthropic' | 'openrouter' | null
+  if (!req.session.userId) return res.json({ user: null, aiConfigured, aiProvider });
   const db = readDB();
   const user = db.users.find((u) => u.id === req.session.userId);
-  if (!user) return res.json({ user: null, aiConfigured });
-  res.json({ user: publicUser(user), aiConfigured });
+  if (!user) return res.json({ user: null, aiConfigured, aiProvider });
+  res.json({ user: publicUser(user), aiConfigured, aiProvider });
 });
 
 // ---------------------------------------------------------------------------
@@ -280,7 +282,8 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
   const profile = getProfile(db, req.session.userId);
   const score = computeScores(profile);
 
-  // No ANTHROPIC_API_KEY set — fall back to the local, template-based
+  // No real model provider configured (ANTHROPIC_API_KEY or OPENROUTER_API_KEY) —
+  // fall back to the local, template-based
   // Planner/Builder (server/generate.js) instead of erroring out, so the
   // "Generate my site" button always produces something in the preview
   // panel. The moment a real key is added, this branch stops being taken.
@@ -304,15 +307,15 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
   }
 
   try {
-    const plan = await generate.planSite(profile, score);
-    const html = await generate.buildSite(plan, profile);
+    const { plan, model: plannerModel } = await generate.planSite(profile, score);
+    const { html, model: builderModel } = await generate.buildSite(plan, profile);
 
     profile.generatedSite = {
       plan,
       html,
       generatedAt: new Date().toISOString(),
-      plannerModel: generate.PLANNER_MODEL,
-      builderModel: generate.BUILDER_MODEL
+      plannerModel,
+      builderModel
     };
     writeDB(db);
 
@@ -320,7 +323,7 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
   } catch (err) {
     console.error('generation failed:', err);
     if (err.message === 'NOT_CONFIGURED') {
-      return res.status(503).json({ error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY in your .env file.' });
+      return res.status(503).json({ error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your .env file.' });
     }
     res.status(502).json({ error: 'Generation failed — the AI service returned an error. Try again in a moment.' });
   }
@@ -345,7 +348,8 @@ app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
 
   const history = Array.isArray((req.body || {}).history) ? req.body.history.slice(-12) : [];
 
-  // No ANTHROPIC_API_KEY set — fall back to the rule-based local agent
+  // No real model provider configured (ANTHROPIC_API_KEY or OPENROUTER_API_KEY) —
+  // fall back to the rule-based local agent
   // (server/chat.js:sendMessageLocal) instead of erroring out, so typing
   // and hitting Enter always does something real. The moment a real key
   // is added, this branch stops being taken.
@@ -365,7 +369,7 @@ app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
   } catch (err) {
     console.error('chat failed:', err);
     if (err.message === 'NOT_CONFIGURED') {
-      return res.status(503).json({ error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY in your .env file.' });
+      return res.status(503).json({ error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your .env file.' });
     }
     res.status(502).json({ error: 'Chat failed — the AI service returned an error. Try again in a moment.' });
   }

@@ -23,29 +23,19 @@
 //     of HTML" call have very different cost/quality tradeoffs.
 // ---------------------------------------------------------------------------
 
-const Anthropic = require('@anthropic-ai/sdk');
+const llm = require('./llm');
 
-const API_KEY = process.env.ANTHROPIC_API_KEY || '';
-
-// Every model below is overridable via env var — see .env.example. Anthropic
-// ships new model versions over time; if a request ever fails with a
-// "model not found"-style error, check
-// https://docs.claude.com/en/docs/about-claude/models for the current
-// identifier and set BRIXOS_PLANNER_MODEL / BRIXOS_BUILDER_MODEL (or
-// BRIXOS_MODEL to set both at once) in your .env file — no code change needed.
-const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
-const PLANNER_MODEL = process.env.BRIXOS_PLANNER_MODEL || process.env.BRIXOS_MODEL || DEFAULT_MODEL;
-const BUILDER_MODEL = process.env.BRIXOS_BUILDER_MODEL || process.env.BRIXOS_MODEL || DEFAULT_MODEL;
-
-let client = null;
-function getClient() {
-  if (!API_KEY) return null;
-  if (!client) client = new Anthropic({ apiKey: API_KEY });
-  return client;
-}
+// PLANNER_MODEL/BUILDER_MODEL are informational labels only (stored on
+// generatedSite for display) — the actual model used for a given call comes
+// back from llm.chatOnce() itself, since with the OpenRouter provider it can
+// be auto-detected at request time rather than fixed at startup. These two
+// constants only cover the Anthropic-configured case for anything that reads
+// them before a call has actually happened.
+const PLANNER_MODEL = process.env.BRIXOS_PLANNER_MODEL || process.env.BRIXOS_MODEL || 'claude-sonnet-4-5-20250929';
+const BUILDER_MODEL = process.env.BRIXOS_BUILDER_MODEL || process.env.BRIXOS_MODEL || 'claude-sonnet-4-5-20250929';
 
 function isConfigured() {
-  return Boolean(API_KEY);
+  return llm.isConfigured();
 }
 
 // ---------------------------------------------------------------------------
@@ -137,13 +127,16 @@ function profileBrief(profile) {
   return lines.join('\n');
 }
 
+// Returns { plan, model } — `model` is the actual model that produced this
+// plan (with the OpenRouter provider, that can be auto-detected per request
+// rather than a fixed constant, so callers should use this over the static
+// PLANNER_MODEL export when they want to record what really ran).
 async function planSite(profile, score) {
-  const anthropic = getClient();
-  if (!anthropic) throw new Error('NOT_CONFIGURED');
+  if (!llm.isConfigured()) throw new Error('NOT_CONFIGURED');
 
-  const msg = await anthropic.messages.create({
-    model: PLANNER_MODEL,
-    max_tokens: 1500,
+  const { toolInput, model } = await llm.chatOnce({
+    role: 'planner',
+    maxTokens: 1500,
     system:
       "You are the BrixOS Planner agent. Given a small retail business's profile — whatever links and " +
       "details it has, however sparse — you decide what its rebuilt website should say and contain. You " +
@@ -151,35 +144,29 @@ async function planSite(profile, score) {
       'submit_site_plan exactly once with your plan. Be concrete and specific to the business — avoid ' +
       'generic filler a plan for any random shop could also use.',
     tools: [PLAN_TOOL],
-    tool_choice: { type: 'tool', name: 'submit_site_plan' },
-    messages: [
-      {
-        role: 'user',
-        content:
-          'Here is everything currently on file for this business:\n\n' +
-          profileBrief(profile) +
-          '\n\nCurrent BrixOS presence score: ' + (score ? score.overall + '/100' : 'not yet scored') +
-          '\n\nPlan its rebuilt homepage.'
-      }
-    ]
+    forceToolName: 'submit_site_plan',
+    userText:
+      'Here is everything currently on file for this business:\n\n' +
+      profileBrief(profile) +
+      '\n\nCurrent BrixOS presence score: ' + (score ? score.overall + '/100' : 'not yet scored') +
+      '\n\nPlan its rebuilt homepage.'
   });
 
-  const toolUse = msg.content.find((b) => b.type === 'tool_use');
-  if (!toolUse) throw new Error('PLANNER_NO_OUTPUT');
-  return toolUse.input;
+  if (!toolInput) throw new Error('PLANNER_NO_OUTPUT');
+  return { plan: toolInput, model };
 }
 
 // ---------------------------------------------------------------------------
 // stage 2 — Builder
 // ---------------------------------------------------------------------------
 
+// Returns { html, model } — see the note on planSite's return value above.
 async function buildSite(plan, profile) {
-  const anthropic = getClient();
-  if (!anthropic) throw new Error('NOT_CONFIGURED');
+  if (!llm.isConfigured()) throw new Error('NOT_CONFIGURED');
 
-  const msg = await anthropic.messages.create({
-    model: BUILDER_MODEL,
-    max_tokens: 8000,
+  const { text, model } = await llm.chatOnce({
+    role: 'builder',
+    maxTokens: 8000,
     system:
       'You are the BrixOS Builder agent. You receive a structured site plan and turn it into a single, ' +
       "complete, self-contained HTML file for a small retail business's homepage — production-quality, " +
@@ -194,24 +181,17 @@ async function buildSite(plan, profile) {
       'placeholder instead of a broken <img> tag.\n' +
       '- Include semantic HTML, a viewport meta tag, and on-page SEO (title, meta description) from the ' +
       'given seo fields.',
-    messages: [
-      {
-        role: 'user',
-        content:
-          'Site plan (JSON):\n' + JSON.stringify(plan, null, 2) +
-          '\n\nContact/link details to weave in where relevant:\n' + profileBrief(profile) +
-          '\n\nWrite the complete HTML file now.'
-      }
-    ]
+    userText:
+      'Site plan (JSON):\n' + JSON.stringify(plan, null, 2) +
+      '\n\nContact/link details to weave in where relevant:\n' + profileBrief(profile) +
+      '\n\nWrite the complete HTML file now.'
   });
 
-  const textBlock = msg.content.find((b) => b.type === 'text');
-  if (!textBlock) throw new Error('BUILDER_NO_OUTPUT');
+  if (!text) throw new Error('BUILDER_NO_OUTPUT');
 
-  let html = textBlock.text.trim();
   // defensive: strip accidental markdown fences if the model adds them anyway
-  html = html.replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  return html;
+  const html = text.replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  return { html, model };
 }
 
 // ---------------------------------------------------------------------------

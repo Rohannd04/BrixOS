@@ -22,23 +22,18 @@
 // same reply — the way ChatGPT/Claude's own tool-use turns work.
 // ---------------------------------------------------------------------------
 
-const Anthropic = require('@anthropic-ai/sdk');
+const llm = require('./llm');
 const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS } = require('./validate');
-const { isConfigured, planSite, buildSite, planSiteLocal, buildSiteLocal, PLANNER_MODEL, BUILDER_MODEL } = require('./generate');
+const { isConfigured, planSite, buildSite, planSiteLocal, buildSiteLocal } = require('./generate');
 const { auditWebsite, auditImprovements, auditSummaryLine } = require('./audit');
 
-const API_KEY = process.env.ANTHROPIC_API_KEY || '';
+// Informational label only — see the note on generate.js's PLANNER_MODEL/
+// BUILDER_MODEL constants. The model that actually ran a given chat turn
+// comes back from llm.runToolLoop() itself.
 const CHAT_MODEL = process.env.BRIXOS_CHAT_MODEL || process.env.BRIXOS_MODEL || 'claude-sonnet-4-5-20250929';
 const MAX_TOOL_TURNS = 4;
-
-let client = null;
-function getClient() {
-  if (!API_KEY) return null;
-  if (!client) client = new Anthropic({ apiKey: API_KEY });
-  return client;
-}
 
 const SAVE_FIELD_TOOL = {
   name: 'save_profile_field',
@@ -96,102 +91,76 @@ function systemPrompt(profile, score) {
 }
 
 async function sendMessage(message, history, userId) {
-  const anthropic = getClient();
-  if (!anthropic) throw new Error('NOT_CONFIGURED');
+  if (!llm.isConfigured()) throw new Error('NOT_CONFIGURED');
 
   const db = readDB();
   let profile = getProfile(db, userId);
   let score = computeScores(profile);
   let generated = false;
 
-  // client-supplied history is already {role, content: string} pairs — fine
-  // as-is for the first turn; tool-use turns we append below use Anthropic's
-  // richer content-block shape.
-  const messages = history
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-    .map((m) => ({ role: m.role, content: m.content }))
-    .concat([{ role: 'user', content: message }]);
+  // Executes one tool call and returns the plain-text result the model
+  // sees — provider-agnostic, llm.runToolLoop() handles the actual message
+  // threading for whichever of Anthropic/OpenRouter is configured.
+  async function onToolCall(name, input) {
+    if (name === 'save_profile_field') {
+      const { field, value } = input || {};
+      const check = EDITABLE_FIELDS.includes(field) ? validateField(field, value) : { ok: false, message: 'Unknown field.' };
+      if (!check.ok) return `Rejected: ${check.message}`;
 
-  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    const resp = await anthropic.messages.create({
-      model: CHAT_MODEL,
-      max_tokens: 600,
-      system: systemPrompt(profile, score),
-      tools: [SAVE_FIELD_TOOL, GENERATE_TOOL],
-      messages
-    });
+      const websiteChanged = field === 'website' && profile.website !== check.value;
+      profile[field] = check.value;
+      writeDB(db);
 
-    const toolUses = resp.content.filter((b) => b.type === 'tool_use');
+      let resultText = `Saved ${field}.`;
+      if (websiteChanged) {
+        // Websites are the one field BrixOS can actually go verify — fetch
+        // and inspect it now, and hand the findings back as tool grounding
+        // so the model's own reply can cite real specifics instead of
+        // generic advice.
+        const audit = await auditWebsite(check.value);
+        profile.siteAudit = audit;
+        writeDB(db);
+        resultText += ` Live audit of that site — ${auditSummaryLine(audit)}. ` +
+          'Mention the specific issues found (not a generic list) and what to fix first.';
+      }
 
-    if (!toolUses.length) {
-      const text = resp.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-        .trim();
-      return { reply: text || "Sorry, I didn't catch that — try again?", profile, score, generated, aiSource: 'model' };
+      score = computeScores(profile);
+      return resultText;
     }
 
-    messages.push({ role: 'assistant', content: resp.content });
-
-    const toolResults = [];
-    for (const call of toolUses) {
-      if (call.name === 'save_profile_field') {
-        const { field, value } = call.input || {};
-        const check = EDITABLE_FIELDS.includes(field) ? validateField(field, value) : { ok: false, message: 'Unknown field.' };
-        if (check.ok) {
-          const websiteChanged = field === 'website' && profile.website !== check.value;
-          profile[field] = check.value;
-          writeDB(db);
-
-          let resultText = `Saved ${field}.`;
-          if (websiteChanged) {
-            // Websites are the one field BrixOS can actually go verify —
-            // fetch and inspect it now, and hand the findings back as tool
-            // grounding so the model's own reply can cite real specifics
-            // instead of generic advice.
-            const audit = await auditWebsite(check.value);
-            profile.siteAudit = audit;
-            writeDB(db);
-            resultText += ` Live audit of that site — ${auditSummaryLine(audit)}. ` +
-              'Mention the specific issues found (not a generic list) and what to fix first.';
-          }
-
-          score = computeScores(profile);
-          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: resultText });
-        } else {
-          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Rejected: ${check.message}`, is_error: true });
-        }
-      } else if (call.name === 'generate_site') {
-        try {
-          const plan = await planSite(profile, score);
-          const html = await buildSite(plan, profile);
-          profile.generatedSite = {
-            plan,
-            html,
-            generatedAt: new Date().toISOString(),
-            plannerModel: PLANNER_MODEL,
-            builderModel: BUILDER_MODEL
-          };
-          writeDB(db);
-          generated = true;
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: `Generated "${plan.siteName}" — now showing in the preview panel.`
-          });
-        } catch (err) {
-          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Generation failed: ${err.message}`, is_error: true });
-        }
-      } else {
-        toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: 'Unknown tool.', is_error: true });
+    if (name === 'generate_site') {
+      try {
+        const { plan, model: plannerModel } = await planSite(profile, score);
+        const { html, model: builderModel } = await buildSite(plan, profile);
+        profile.generatedSite = {
+          plan,
+          html,
+          generatedAt: new Date().toISOString(),
+          plannerModel,
+          builderModel
+        };
+        writeDB(db);
+        generated = true;
+        return `Generated "${plan.siteName}" — now showing in the preview panel.`;
+      } catch (err) {
+        return `Generation failed: ${err.message}`;
       }
     }
 
-    messages.push({ role: 'user', content: toolResults });
+    return 'Unknown tool.';
   }
 
-  return { reply: "That took a few too many steps — try asking me one thing at a time?", profile, score, generated, aiSource: 'model' };
+  const { text } = await llm.runToolLoop({
+    role: 'chat',
+    system: () => systemPrompt(profile, score),
+    message,
+    history,
+    tools: [SAVE_FIELD_TOOL, GENERATE_TOOL],
+    maxTurns: MAX_TOOL_TURNS,
+    onToolCall
+  });
+
+  return { reply: text, profile, score, generated, aiSource: 'model' };
 }
 
 // ---------------------------------------------------------------------------
