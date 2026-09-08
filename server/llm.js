@@ -315,9 +315,14 @@ async function callOpenRouterWithRetry(args) {
 // ---------------------------------------------------------------------------
 
 const GROQ_TIMEOUT_MS = 25000;
+// Verified live against Groq's own /v1/models endpoint with a real account
+// key (Sept 2026): the plain "llama-3.3-70b-versatile" / "llama-3.1-8b-instant"
+// ids have been retired from this account's available models (Groq's lineup
+// has shifted to OpenAI's open-weight models + Qwen + their own "compound"
+// agents) — confirmed via a real tool-calling request against both ids below.
 const GROQ_MODEL_CANDIDATES = process.env.GROQ_MODEL
   ? [process.env.GROQ_MODEL]
-  : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+  : ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
 const badGroqModels = new Set();
 
 if (GROQ_KEY) {
@@ -397,13 +402,16 @@ function groqConfigured() {
 
 const GEMINI_TIMEOUT_MS = 25000;
 // Best-effort defaults as of this writing — override with GEMINI_MODEL if
-// Google's free-tier lineup has moved on by the time this runs. Two
-// candidates (a capable one, then a lighter/cheaper one more likely to
-// stay inside a free quota) so a single overloaded model doesn't stall
-// the whole fallback.
+// Verified live against Gemini's own OpenAI-compat endpoint with a real
+// account key (Sept 2026): "gemini-2.5-flash"/"gemini-2.5-flash-lite" now
+// 404 with "no longer available to new users" — Google's error body itself
+// names the replacements. "gemini-flash-lite-latest" is one of Google's own
+// rolling aliases (always points at their current lite model, so it won't
+// go stale the way a dated id eventually will); "gemini-3.5-flash-lite" is
+// confirmed working as a pinned fallback if the alias ever misbehaves.
 const GEMINI_MODEL_CANDIDATES = process.env.GEMINI_MODEL
   ? [process.env.GEMINI_MODEL]
-  : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  : ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite'];
 const badGeminiModels = new Set();
 
 if (GEMINI_KEY) {
