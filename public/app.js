@@ -169,6 +169,52 @@
   var engineMode = $('engineMode');
   var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
 
+  // ===========================================================================
+  // workspace mode — once the user actually starts working (first chat
+  // message, or "Generate my site"), the marketing hero/pipeline give way to
+  // a focused two-pane layout: chat minimized to the left, live preview on
+  // the right (stacked — chat on top — on narrow screens). See
+  // enterWorkspaceMode() below; the CSS lives under "workspace mode" in
+  // styles.css.
+  // ===========================================================================
+  var workspaceView = $('workspaceView');
+  var workspaceLeft = $('workspaceLeft');
+  var workspaceRight = $('workspaceRight');
+  var previewCard = $('previewCard');
+  var consoleEl = document.querySelector('.console');
+  var wsScore = $('wsScore');
+  var wsScoreNum = $('wsScoreNum');
+  var wsScoreTitle = $('wsScoreTitle');
+  var wsScoreStatus = $('wsScoreStatus');
+  var wsRingFill = $('wsRingFill');
+  var wsImprove = $('wsImprove');
+  var wsImproveTags = $('wsImproveTags');
+  var WS_RING_CIRC = 2 * Math.PI * 24;
+  var DIMENSION_LABELS = {
+    completeness: 'Business/profile completeness',
+    trust: 'Trust and credibility',
+    ux: 'UX and conversion',
+    technical: 'Technical quality',
+    seo: 'SEO',
+    aeogeo: 'AEO/GEO readiness',
+    content: 'Content and freshness'
+  };
+  var inWorkspace = false;
+
+  function enterWorkspaceMode() {
+    if (inWorkspace) return;
+    inWorkspace = true;
+    document.body.classList.add('is-workspace');
+    wsScore.hidden = false;
+    // move the REAL console/chat and preview card in — same elements, same
+    // listeners and state, just relocated — not copies.
+    workspaceLeft.appendChild(consoleEl);
+    workspaceRight.appendChild(previewCard);
+    workspaceView.hidden = false;
+    workspaceView.classList.add('is-active');
+    renderScoreUI();
+  }
+
   // topbar status pill: "ONLINE" once a real model provider (Anthropic or
   // OpenRouter — see server/llm.js) is configured on the server; "LOCAL MODE"
   // when the chat/generate agents are running on the rule-based fallback
@@ -566,8 +612,42 @@
     var name = state.profile.business || (state.authed ? state.authUser.name + "'s business" : 'Aurora Boutique');
     scanTitle.innerHTML = 'Live scan &mdash; ' + escapeHtml(name);
 
+    // compact workspace score panel — mirrors the same gauge/status shown in
+    // the full score card above, but as just the final number (see
+    // enterWorkspaceMode): the full per-dimension breakdown stays in the
+    // (now hidden-in-workspace) score card rather than cluttering the chat.
+    if (inWorkspace) {
+      wsScoreNum.textContent = s && s.selectedCount ? overall : '--';
+      wsRingFill.style.strokeDasharray = WS_RING_CIRC;
+      wsRingFill.style.strokeDashoffset = s && s.selectedCount ? WS_RING_CIRC * (1 - overall / 100) : WS_RING_CIRC;
+      wsScoreTitle.textContent = name;
+      wsScoreStatus.textContent = scoreStatus.textContent;
+
+      var weak = (s && s.selectedCount) ? DIMENSIONS.filter(function (d) { return s[d] < 50; }).sort(function (a, b) { return s[a] - s[b]; }) : [];
+      if (weak.length) {
+        wsImprove.hidden = false;
+        wsImproveTags.innerHTML = weak.map(function (d) {
+          return '<span class="ws-tag">' + escapeHtml(DIMENSION_LABELS[d]) + '</span>';
+        }).join('');
+      } else {
+        wsImprove.hidden = true;
+        wsImproveTags.innerHTML = '';
+      }
+    }
+
     if (state.profile.website) {
-      previewUrl.textContent = state.profile.website.replace(/^https?:\/\//, '');
+      // show just the hostname, not the whole scraped URL — a real business
+      // link can carry a long path and tracking query string
+      // (?gad_source=...&gbraid=...) that, left in as one unbroken string,
+      // was forcing this "browser address bar" mock (and the card/grid
+      // around it) wider than the viewport instead of truncating in place.
+      var hostname;
+      try {
+        hostname = new URL(/^https?:\/\//.test(state.profile.website) ? state.profile.website : 'https://' + state.profile.website).hostname;
+      } catch (err) {
+        hostname = state.profile.website.replace(/^https?:\/\//, '').split(/[/?#]/)[0];
+      }
+      previewUrl.textContent = hostname || state.profile.website.replace(/^https?:\/\//, '');
     } else {
       var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'yourstore';
       previewUrl.textContent = slug + '.brixos.site';
@@ -712,6 +792,7 @@
       return;
     }
 
+    enterWorkspaceMode();
     consoleInput.value = '';
     appendChatBubble('user', value);
     runChatTurn(value, chatHistory.slice(-12));
@@ -923,6 +1004,7 @@
     }
     if (orchestratorBusy) return;
 
+    enterWorkspaceMode();
     setOrchestratorBusy(true);
     showOrchestratorStatus({ status: 'QUEUED' });
 
