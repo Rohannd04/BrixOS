@@ -715,6 +715,27 @@
   });
 
   // ===========================================================================
+  // Hero CTAs — "Start your free scan" / "See a sample score"
+  // ===========================================================================
+
+  var startScanBtn = $('startScanBtn');
+  var sampleScoreBtn = $('sampleScoreBtn');
+
+  if (startScanBtn) {
+    startScanBtn.addEventListener('click', function () {
+      consoleInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      consoleInput.focus();
+    });
+  }
+
+  if (sampleScoreBtn) {
+    sampleScoreBtn.addEventListener('click', function () {
+      var panel = document.querySelector('.panel-section');
+      if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
+  // ===========================================================================
   // "+" popover open/close
   // ===========================================================================
 
