@@ -41,7 +41,14 @@ const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 // fallback the moment OpenRouter's free tier is unavailable (see
 // callFreeProviderWithRetry below), not a provider you pick explicitly.
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
-const PROVIDER = ANTHROPIC_KEY ? 'anthropic' : ((OPENROUTER_KEY || GROQ_KEY) ? 'openrouter' : null);
+// Gemini — a THIRD independent free-tier provider (Google AI Studio,
+// aistudio.google.com/apikey, free, no card required), reached through
+// Google's own OpenAI-compatibility endpoint. Same reasoning as GROQ_KEY
+// above: another provider's free-tier quota is completely independent of
+// OpenRouter's and Groq's, so it's one more fallback before BrixOS has to
+// give up entirely. Also purely automatic — never picked explicitly.
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const PROVIDER = ANTHROPIC_KEY ? 'anthropic' : ((OPENROUTER_KEY || GROQ_KEY || GEMINI_KEY) ? 'openrouter' : null);
 
 const ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
 const ANTHROPIC_MODELS = {
@@ -379,35 +386,132 @@ function groqConfigured() {
   return Boolean(GROQ_KEY);
 }
 
+// ---------------------------------------------------------------------------
+// Gemini — third free-tier provider, used only as a fallback (see the
+// comment on GEMINI_KEY above). Reached through Google's own
+// OpenAI-compatibility endpoint (https://ai.google.dev/gemini-api/docs/openai),
+// which accepts the same request shape and tool-calling format as
+// OpenRouter/Groq, so it slots into the exact same data.choices[0].message
+// parsing every caller already uses.
+// ---------------------------------------------------------------------------
+
+const GEMINI_TIMEOUT_MS = 25000;
+// Best-effort defaults as of this writing — override with GEMINI_MODEL if
+// Google's free-tier lineup has moved on by the time this runs. Two
+// candidates (a capable one, then a lighter/cheaper one more likely to
+// stay inside a free quota) so a single overloaded model doesn't stall
+// the whole fallback.
+const GEMINI_MODEL_CANDIDATES = process.env.GEMINI_MODEL
+  ? [process.env.GEMINI_MODEL]
+  : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const badGeminiModels = new Set();
+
+if (GEMINI_KEY) {
+  console.log(`[BrixOS] Gemini configured as a free-tier fallback (candidates: ${GEMINI_MODEL_CANDIDATES.join(', ')}).`);
+}
+
+function markGeminiModelBad(model, reason) {
+  if (process.env.GEMINI_MODEL) return; // never route around a manual pin
+  badGeminiModels.add(model);
+  console.warn(`[BrixOS] Gemini: model "${model}" failed (${reason}) — trying the next candidate.`);
+}
+
+async function callGemini({ model, system, messages, tools, forceToolName, maxTokens }) {
+  const body = {
+    model,
+    max_tokens: maxTokens,
+    messages: system ? [{ role: 'system', content: system }].concat(messages) : messages
+  };
+  if (tools) body.tools = toOpenAiTools(tools);
+  if (forceToolName) body.tool_choice = { type: 'function', function: { name: forceToolName } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GEMINI_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
+      throw new Error('GEMINI_ERROR: ' + msg);
+    }
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`GEMINI_ERROR: timed out after ${GEMINI_TIMEOUT_MS / 1000}s`);
+    if (err.message && err.message.startsWith('GEMINI_ERROR:')) throw err;
+    throw new Error('GEMINI_ERROR: ' + err.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callGeminiWithRetry(args) {
+  const candidates = GEMINI_MODEL_CANDIDATES.filter((m) => !badGeminiModels.has(m));
+  const tryList = candidates.length ? candidates : GEMINI_MODEL_CANDIDATES;
+  let lastErr;
+  for (const model of tryList) {
+    try {
+      const data = await callGemini({ ...args, model });
+      return { data, model };
+    } catch (err) {
+      lastErr = err;
+      markGeminiModelBad(model, err.message);
+    }
+  }
+  throw lastErr;
+}
+
+function geminiConfigured() {
+  return Boolean(GEMINI_KEY);
+}
+
 // The single entry point every free-tier caller (openRouterComplete,
 // runToolLoop's 'openrouter' branch) should use instead of calling
 // callOpenRouterWithRetry directly: try OpenRouter first (unchanged
-// behavior for everyone who only has that key), and only reach for Groq
-// if OpenRouter is either not configured or just failed outright — e.g.
-// its account-wide free-tier daily cap is exhausted. Silent no-op when
-// Groq isn't configured, so nothing changes for anyone who hasn't set
-// GROQ_API_KEY.
+// behavior for everyone who only has that key), then Groq, then Gemini —
+// each only reached if the previous one is either not configured or just
+// failed outright (e.g. an account-wide free-tier daily cap is exhausted).
+// Silent no-op for any provider that isn't configured, so nothing changes
+// for anyone who hasn't set the corresponding key.
 async function callFreeProviderWithRetry(args) {
   if (OPENROUTER_KEY) {
     try {
       return await callOpenRouterWithRetry(args);
     } catch (err) {
-      if (!GROQ_KEY) throw err;
-      console.warn(`[BrixOS] OpenRouter free tier unavailable (${err.message}) — falling back to Groq.`);
+      if (!GROQ_KEY && !GEMINI_KEY) throw err;
+      console.warn(`[BrixOS] OpenRouter free tier unavailable (${err.message}) — falling back to the next free provider.`);
     }
   }
-  if (GROQ_KEY) return callGroqWithRetry(args);
+  if (GROQ_KEY) {
+    try {
+      return await callGroqWithRetry(args);
+    } catch (err) {
+      if (!GEMINI_KEY) throw err;
+      console.warn(`[BrixOS] Groq unavailable (${err.message}) — falling back to Gemini.`);
+    }
+  }
+  if (GEMINI_KEY) return callGeminiWithRetry(args);
   throw new Error('NOT_CONFIGURED');
 }
 
-// A dud (empty) reply's model id may have come from either provider — blacklist
-// it wherever it actually belongs rather than assuming OpenRouter. The two
-// providers' model id formats never collide (OpenRouter's are
-// "vendor/model[:free]"; Groq's are bare names), so checking the candidate
-// lists is unambiguous.
+// A dud (empty) reply's model id may have come from any of the three
+// providers — blacklist it wherever it actually belongs rather than
+// assuming OpenRouter. None of the three providers' model id formats
+// collide (OpenRouter's are "vendor/model[:free]"; Groq's and Gemini's are
+// bare names, and their model families don't share names), so checking the
+// candidate lists is unambiguous.
 function markFreeModelBad(model, reason) {
   if (GROQ_MODEL_CANDIDATES.includes(model)) {
     markGroqModelBad(model, reason);
+  } else if (GEMINI_MODEL_CANDIDATES.includes(model)) {
+    markGeminiModelBad(model, reason);
   } else {
     markOpenRouterModelBad(model, reason);
   }
@@ -444,7 +548,7 @@ async function anthropicComplete({ role, system, userText, tools, forceToolName,
 }
 
 async function openRouterComplete({ system, userText, tools, forceToolName, maxTokens }) {
-  if (!OPENROUTER_KEY && !GROQ_KEY) throw new Error('NOT_CONFIGURED');
+  if (!OPENROUTER_KEY && !GROQ_KEY && !GEMINI_KEY) throw new Error('NOT_CONFIGURED');
   const messages = [{ role: 'user', content: userText }];
 
   // Same dud-reply problem runToolLoop() guards against (see
@@ -507,10 +611,11 @@ function claudeConfigured() {
 function openRouterConfigured() {
   // Labeled "openRouter" for backward compatibility (this is what every
   // caller checks to decide whether the free/cheap tier is usable at all),
-  // but true whenever EITHER free provider is configured — Groq is an
-  // automatic fallback inside the same call path, not a separately-picked
-  // provider, so callers never need to know which one actually ran.
-  return Boolean(OPENROUTER_KEY || GROQ_KEY);
+  // but true whenever ANY of the three free providers is configured — Groq
+  // and Gemini are automatic fallbacks inside the same call path, not
+  // separately-picked providers, so callers never need to know which one
+  // actually ran.
+  return Boolean(OPENROUTER_KEY || GROQ_KEY || GEMINI_KEY);
 }
 
 async function callClaudeDirect(args) {
@@ -642,5 +747,5 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
 module.exports = {
   isConfigured, providerName, chatOnce, runToolLoop,
   // orchestrator-facing direct provider access (see the comment above)
-  claudeConfigured, openRouterConfigured, groqConfigured, callClaudeDirect, callOpenRouterDirect
+  claudeConfigured, openRouterConfigured, groqConfigured, geminiConfigured, callClaudeDirect, callOpenRouterDirect
 };
