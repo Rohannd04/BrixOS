@@ -156,11 +156,12 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
-  if (!req.session.userId) return res.json({ user: null });
+  const aiConfigured = generate.isConfigured();
+  if (!req.session.userId) return res.json({ user: null, aiConfigured });
   const db = readDB();
   const user = db.users.find((u) => u.id === req.session.userId);
-  if (!user) return res.json({ user: null });
-  res.json({ user: publicUser(user) });
+  if (!user) return res.json({ user: null, aiConfigured });
+  res.json({ user: publicUser(user), aiConfigured });
 });
 
 // ---------------------------------------------------------------------------
@@ -259,15 +260,32 @@ const generateLimiter = rateLimit({
 });
 
 app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
-  if (!generate.isConfigured()) {
-    return res.status(503).json({
-      error: 'Site generation isn’t configured yet — set ANTHROPIC_API_KEY in a .env file (see .env.example) and restart the server.'
-    });
-  }
-
   const db = readDB();
   const profile = getProfile(db, req.session.userId);
   const score = computeScores(profile);
+
+  // No ANTHROPIC_API_KEY set — fall back to the local, template-based
+  // Planner/Builder (server/generate.js) instead of erroring out, so the
+  // "Generate my site" button always produces something in the preview
+  // panel. The moment a real key is added, this branch stops being taken.
+  if (!generate.isConfigured()) {
+    try {
+      const plan = generate.planSiteLocal(profile, score);
+      const html = generate.buildSiteLocal(plan, profile);
+      profile.generatedSite = {
+        plan,
+        html,
+        generatedAt: new Date().toISOString(),
+        plannerModel: 'local-template',
+        builderModel: 'local-template'
+      };
+      writeDB(db);
+      return res.json(Object.assign(profilePayload(profile), { aiSource: 'local' }));
+    } catch (err) {
+      console.error('local generation failed:', err);
+      return res.status(500).json({ error: 'Generation failed — try again in a moment.' });
+    }
+  }
 
   try {
     const plan = await generate.planSite(profile, score);
@@ -282,7 +300,7 @@ app.post('/api/generate', requireAuth, generateLimiter, async (req, res) => {
     };
     writeDB(db);
 
-    res.json(profilePayload(profile));
+    res.json(Object.assign(profilePayload(profile), { aiSource: 'model' }));
   } catch (err) {
     console.error('generation failed:', err);
     if (err.message === 'NOT_CONFIGURED') {
@@ -305,17 +323,25 @@ const chatLimiter = rateLimit({
 });
 
 app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
-  if (!chat.isConfigured()) {
-    return res.status(503).json({
-      error: 'Chat isn’t configured yet — set ANTHROPIC_API_KEY in a .env file (see .env.example) and restart the server.'
-    });
-  }
-
   const message = String((req.body || {}).message || '').trim();
   if (!message) return res.status(400).json({ error: 'Say something first.' });
   if (message.length > 2000) return res.status(400).json({ error: 'That message is a bit long — try trimming it.' });
 
   const history = Array.isArray((req.body || {}).history) ? req.body.history.slice(-12) : [];
+
+  // No ANTHROPIC_API_KEY set — fall back to the rule-based local agent
+  // (server/chat.js:sendMessageLocal) instead of erroring out, so typing
+  // and hitting Enter always does something real. The moment a real key
+  // is added, this branch stops being taken.
+  if (!chat.isConfigured()) {
+    try {
+      const result = await chat.sendMessageLocal(message, history, req.session.userId);
+      return res.json(result);
+    } catch (err) {
+      console.error('local chat failed:', err);
+      return res.status(500).json({ error: 'Chat failed — try again in a moment.' });
+    }
+  }
 
   try {
     const result = await chat.sendMessage(message, history, req.session.userId);

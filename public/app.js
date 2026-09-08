@@ -116,7 +116,8 @@
     authUser: null,
     authed: false,
     profile: null,
-    score: null
+    score: null,
+    aiConfigured: true // optimistic default until /api/auth/me says otherwise
   };
 
   function demoProfile() {
@@ -158,7 +159,16 @@
   var previewBody = $('previewBody');
   var previewMeta = $('previewMeta');
   var chatLog = $('chatLog');
+  var engineMode = $('engineMode');
   var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
+
+  // topbar status pill: "ONLINE" once ANTHROPIC_API_KEY is set on the server;
+  // "LOCAL MODE" when the chat/generate agents are running on the rule-based
+  // fallback instead of a real model call (see server/chat.js, server/generate.js)
+  function renderEngineStatus() {
+    if (!engineMode) return;
+    engineMode.textContent = state.aiConfigured ? 'ONLINE' : 'LOCAL MODE';
+  }
 
   var openFieldId = null; // which text-field accordion is expanded in the popover
 
@@ -892,6 +902,8 @@
 
   function boot() {
     api('/api/auth/me').then(function (data) {
+      state.aiConfigured = Boolean(data.aiConfigured);
+      renderEngineStatus();
       if (data.user) {
         state.authed = true;
         state.authUser = data.user;

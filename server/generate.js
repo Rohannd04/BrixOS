@@ -191,4 +191,138 @@ async function buildSite(plan, profile) {
   return html;
 }
 
-module.exports = { isConfigured, planSite, buildSite, PLANNER_MODEL, BUILDER_MODEL };
+// ---------------------------------------------------------------------------
+// local fallback — no API key needed
+//
+// When ANTHROPIC_API_KEY isn't set, the routes below call these instead of
+// erroring out. Same output shapes as the real Planner/Builder (a `plan`
+// object, a complete self-contained HTML string) so everything downstream —
+// the DB, the preview iframe, the chat agent — treats it identically. The
+// only difference is the plan/site come from templates instead of a model
+// call, so this is instant, free, and works completely offline.
+// ---------------------------------------------------------------------------
+
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function planSiteLocal(profile, score) {
+  const siteName = String(profile.business || '').trim() || 'Your Business';
+  const tagline = profile.website
+    ? 'Everything customers liked about your site — sharper, faster, and easier to shop.'
+    : 'Quality and service worth showing off — built for the customers walking by today.';
+
+  const sections = [
+    { type: 'hero', headline: `Welcome to ${siteName}`, body: tagline, cta: 'Get in touch' },
+    {
+      type: 'about',
+      headline: 'Our Story',
+      body: `${siteName} is a local favorite built on quality and service — this section is where that story gets told.`
+    },
+    {
+      type: 'products',
+      headline: 'What We Offer',
+      body: 'A closer look at the products and services customers come back for.'
+    },
+    profile.map
+      ? { type: 'contact', headline: 'Visit Us', body: 'Find us in person or reach out online — we’d love to hear from you.', cta: 'Get directions' }
+      : { type: 'contact', headline: 'Get In Touch', body: 'Reach out any time, however’s easiest for you.', cta: 'Contact us' }
+  ];
+
+  return {
+    siteName,
+    tagline,
+    tone: 'warm and approachable',
+    accentColor: '#B5622E',
+    nav: ['Home', 'About', 'Shop', 'Contact'],
+    sections,
+    seo: {
+      title: `${siteName} — Official Site`,
+      description: tagline,
+      keywords: [siteName.toLowerCase(), 'local business', 'shop near me']
+    },
+    aeoFaq: [
+      { q: `What does ${siteName} sell?`, a: 'A curated selection built around what local customers ask for most.' },
+      { q: `Where is ${siteName} located?`, a: profile.map ? 'See the map link on this page for directions.' : 'Contact the business directly for location details.' }
+    ]
+  };
+}
+
+function buildSiteLocal(plan, profile) {
+  const accent = plan.accentColor || '#B5622E';
+  const hero = plan.sections.find((s) => s.type === 'hero') || plan.sections[0];
+  const about = plan.sections.find((s) => s.type === 'about');
+  const products = plan.sections.find((s) => s.type === 'products');
+  const contact = plan.sections.find((s) => s.type === 'contact') || plan.sections[plan.sections.length - 1];
+
+  const links = [];
+  if (profile.website) links.push(`<a href="${escapeHtml(profile.website)}" target="_blank" rel="noopener">Website</a>`);
+  if (profile.instagram) links.push(`<a href="${escapeHtml(profile.instagram)}" target="_blank" rel="noopener">Instagram</a>`);
+  if (profile.facebook) links.push(`<a href="${escapeHtml(profile.facebook)}" target="_blank" rel="noopener">Facebook</a>`);
+  if (profile.map) links.push(`<a href="${escapeHtml(profile.map)}" target="_blank" rel="noopener">Map</a>`);
+  if (profile.gmail) links.push(`<a href="mailto:${escapeHtml(profile.gmail)}">Email</a>`);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(plan.seo.title)}</title>
+<meta name="description" content="${escapeHtml(plan.seo.description)}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root { --accent: ${accent}; --bg: #F7F1E6; --panel: #fff; --text: #1E1912; --text-muted: #67594A; --border: rgba(33,27,20,.1); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'IBM Plex Sans', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 20px 6vw; display: flex; justify-content: space-between; align-items: center; }
+  .brand { font-family: 'Space Grotesk', system-ui, sans-serif; font-weight: 700; font-size: 20px; }
+  nav a { color: var(--text); text-decoration: none; margin-left: 22px; font-size: 14px; }
+  .hero { padding: 64px 6vw 56px; text-align: center; }
+  .hero h1 { font-family: 'Space Grotesk', system-ui, sans-serif; font-size: clamp(28px, 5vw, 48px); margin: 0 0 16px; }
+  .hero p { color: var(--text-muted); max-width: 560px; margin: 0 auto 28px; font-size: 17px; }
+  .btn { display: inline-block; background: var(--text); color: var(--bg); padding: 14px 28px; border-radius: 999px; text-decoration: none; font-weight: 600; }
+  section { padding: 48px 6vw; max-width: 960px; margin: 0 auto; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 18px; margin-top: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+  .card .thumb { height: 100px; border-radius: 10px; background: linear-gradient(135deg, rgba(181,98,46,.18), rgba(181,98,46,.06)); margin-bottom: 14px; }
+  h2 { font-family: 'Space Grotesk', system-ui, sans-serif; font-size: 28px; margin-top: 0; }
+  footer { padding: 32px 6vw; border-top: 1px solid var(--border); text-align: center; color: var(--text-muted); font-size: 14px; }
+  footer a { color: var(--accent); margin: 0 8px; text-decoration: none; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">${escapeHtml(plan.siteName)}</div>
+    <nav>${(plan.nav || []).map((n) => `<a href="#">${escapeHtml(n)}</a>`).join('')}</nav>
+  </header>
+  <div class="hero">
+    <h1>${escapeHtml(hero.headline)}</h1>
+    <p>${escapeHtml(hero.body)}</p>
+    <a class="btn" href="#contact">${escapeHtml(hero.cta || 'Get in touch')}</a>
+  </div>
+  ${about ? `<section><h2>${escapeHtml(about.headline)}</h2><p>${escapeHtml(about.body)}</p></section>` : ''}
+  ${products ? `<section><h2>${escapeHtml(products.headline)}</h2><p>${escapeHtml(products.body)}</p>
+    <div class="card-grid">
+      <div class="card"><div class="thumb"></div><strong>Best seller</strong><p style="color:var(--text-muted);font-size:14px;">A favorite customers keep coming back for.</p></div>
+      <div class="card"><div class="thumb"></div><strong>New arrival</strong><p style="color:var(--text-muted);font-size:14px;">Fresh in and ready to shop.</p></div>
+      <div class="card"><div class="thumb"></div><strong>Local pick</strong><p style="color:var(--text-muted);font-size:14px;">A neighborhood favorite, made right here.</p></div>
+    </div>
+  </section>` : ''}
+  <section id="contact">
+    <h2>${escapeHtml(contact.headline)}</h2>
+    <p>${escapeHtml(contact.body)}</p>
+    ${links.length ? `<p>${links.join(' &middot; ')}</p>` : ''}
+  </section>
+  <footer>${escapeHtml(plan.siteName)} &middot; Built with BrixOS</footer>
+</body>
+</html>`;
+}
+
+module.exports = {
+  isConfigured, planSite, buildSite, PLANNER_MODEL, BUILDER_MODEL,
+  planSiteLocal, buildSiteLocal
+};

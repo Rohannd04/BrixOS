@@ -26,7 +26,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS } = require('./validate');
-const { isConfigured, planSite, buildSite, PLANNER_MODEL, BUILDER_MODEL } = require('./generate');
+const { isConfigured, planSite, buildSite, planSiteLocal, buildSiteLocal, PLANNER_MODEL, BUILDER_MODEL } = require('./generate');
 
 const API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const CHAT_MODEL = process.env.BRIXOS_CHAT_MODEL || process.env.BRIXOS_MODEL || 'claude-sonnet-4-5-20250929';
@@ -119,7 +119,7 @@ async function sendMessage(message, history, userId) {
         .map((b) => b.text)
         .join('\n')
         .trim();
-      return { reply: text || "Sorry, I didn't catch that — try again?", profile, score, generated };
+      return { reply: text || "Sorry, I didn't catch that — try again?", profile, score, generated, aiSource: 'model' };
     }
 
     messages.push({ role: 'assistant', content: resp.content });
@@ -166,7 +166,125 @@ async function sendMessage(message, history, userId) {
     messages.push({ role: 'user', content: toolResults });
   }
 
-  return { reply: "That took a few too many steps — try asking me one thing at a time?", profile, score, generated };
+  return { reply: "That took a few too many steps — try asking me one thing at a time?", profile, score, generated, aiSource: 'model' };
 }
 
-module.exports = { sendMessage, isConfigured, CHAT_MODEL };
+// ---------------------------------------------------------------------------
+// local fallback — no API key needed
+//
+// When ANTHROPIC_API_KEY isn't set, the console still has to actually do
+// something when you hit Enter, instead of the whole feature just erroring.
+// This is a lightweight, rule-based stand-in for the same two things the
+// real agent can do:
+//   - it recognizes a business name / website / Instagram / Facebook /
+//     map link / gmail address dropped in plain text and saves it, the
+//     same as save_profile_field
+//   - it recognizes "build/generate/rebuild my site" and runs the local
+//     (also-no-API-key) Planner/Builder templates from generate.js
+// It's obviously not a real conversation — no free-form understanding —
+// but typing and hitting Enter always does something real to your saved
+// profile and the preview panel, instead of a dead end.
+// ---------------------------------------------------------------------------
+
+function extractFieldsLocal(message) {
+  const found = {};
+  let working = ' ' + message + ' ';
+
+  const emailMatch = working.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  if (emailMatch) {
+    const email = emailMatch[0].toLowerCase();
+    if (/@gmail\.com$/i.test(email)) found.gmail = email;
+    // strip it out so its domain isn't also picked up as a website link below
+    working = working.replace(emailMatch[0], ' ');
+  }
+
+  const urlMatches = working.match(/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+(?:\/[^\s,'"]*)?/gi) || [];
+  for (const rawMatch of urlMatches) {
+    const raw = rawMatch.replace(/[),.!?]+$/, '');
+    const withProtocol = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw;
+    const lower = withProtocol.toLowerCase();
+    if (lower.includes('instagram.com')) { if (!found.instagram) found.instagram = withProtocol; }
+    else if (lower.includes('facebook.com') || lower.includes('fb.com') || lower.includes('fb.me')) { if (!found.facebook) found.facebook = withProtocol; }
+    else if (lower.includes('maps.google') || lower.includes('goo.gl/maps') || lower.includes('g.page') || lower.includes('maps.app.goo.gl')) { if (!found.map) found.map = withProtocol; }
+    else if (lower.includes('tiktok.com') || lower.includes('twitter.com') || lower.includes('x.com') || lower.includes('linkedin.com') || lower.includes('yelp.com')) { if (!found.social) found.social = withProtocol; }
+    else if (!found.website) found.website = withProtocol;
+  }
+
+  const nameMatch = message.match(/\b(?:my business(?: name)? is|business(?: name)? is|we'?re called|store(?: name)? is|shop(?: name)? is)\s+([A-Za-z][\w&'.\- ]{1,40}?)(?:[.,!]|\s+(?:and|,)|$)/i);
+  if (nameMatch) found.business = nameMatch[1].trim();
+
+  return found;
+}
+
+function detectIntentLocal(message) {
+  const m = message.toLowerCase();
+  if (/\b(generate|build|rebuild|redesign|create)\b[^.!?]*\b(site|website|homepage|page)\b/.test(m)) return 'generate';
+  if (/^\s*(hi+|hello+|hey+|yo+|sup|good\s?(morning|afternoon|evening))\b/.test(m)) return 'greeting';
+  return 'none';
+}
+
+async function sendMessageLocal(message, history, userId) {
+  const db = readDB();
+  let profile = getProfile(db, userId);
+  let score = computeScores(profile);
+  let generated = false;
+  const savedFields = [];
+
+  const found = extractFieldsLocal(message);
+  for (const field of Object.keys(found)) {
+    if (!EDITABLE_FIELDS.includes(field)) continue;
+    const check = validateField(field, found[field]);
+    if (check.ok) {
+      profile[field] = check.value;
+      savedFields.push(field);
+    }
+  }
+  if (savedFields.length) {
+    writeDB(db);
+    score = computeScores(profile);
+  }
+
+  const intent = detectIntentLocal(message);
+  const have = EDITABLE_FIELDS.filter((f) => profile[f]);
+  const missing = EDITABLE_FIELDS.filter((f) => !profile[f]);
+  let reply;
+
+  if (intent === 'generate') {
+    try {
+      const plan = planSiteLocal(profile, score);
+      const html = buildSiteLocal(plan, profile);
+      profile.generatedSite = {
+        plan,
+        html,
+        generatedAt: new Date().toISOString(),
+        plannerModel: 'local-template',
+        builderModel: 'local-template'
+      };
+      writeDB(db);
+      generated = true;
+      reply = `Done — built "${plan.siteName}" from what's on your profile so far. Check the preview panel.` +
+        (missing.length ? ` Add ${missing.slice(0, 2).join(' and ')} when you can and I'll fold them in next time.` : '');
+    } catch (err) {
+      reply = 'Something went wrong building that just now — try again in a moment.';
+    }
+  } else if (savedFields.length) {
+    reply = `Got it — saved your ${savedFields.join(' and ')}.` +
+      (missing.length
+        ? ` Still missing: ${missing.slice(0, 3).join(', ')}. Share those, or say "build my site" whenever you're ready.`
+        : ' That\'s everything I need — say "build my site" and I\'ll generate it.');
+  } else if (intent === 'greeting') {
+    reply = 'Hey! Tell me your business name, or drop a website / Instagram / Facebook / map link, and I\'ll start filling in your presence score. ' +
+      'Once you\'ve shared a bit, just say "build my site" and I\'ll generate a homepage for you.';
+  } else if (have.length) {
+    reply = `So far I have ${have.join(', ')}` +
+      (missing.length ? ` — still missing ${missing.slice(0, 3).join(', ')}.` : '.') +
+      ' Share a link, or say "build my site" whenever you\'re ready.';
+  } else {
+    reply = 'I didn\'t catch a business detail there — try sharing your business name, a website, Instagram, Facebook, or map link, ' +
+      'or ask me to "build my site" once you have.';
+  }
+
+  return { reply, profile, score, generated, aiSource: 'local' };
+}
+
+module.exports = { sendMessage, sendMessageLocal, isConfigured, CHAT_MODEL };
