@@ -132,6 +132,12 @@ const PALETTE_KEYWORDS = [
 function pickPalette(profile, plan) {
   const text = [
     profile && profile.business,
+    // A verified Google Business Profile category (server/places.js) is a
+    // strong, real signal of what this business actually is — check it
+    // alongside the model's own wording rather than only the free-text
+    // fields, so "identify business type" actually changes the visual
+    // identity picked, not just the copy.
+    profile && profile.placeInfo && profile.placeInfo.category,
     plan && plan.project_type,
     plan && plan.business_understanding,
     plan && plan.design_system && plan.design_system.tone

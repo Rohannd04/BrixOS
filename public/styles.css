@@ -412,8 +412,8 @@ h1 {
 
 .popover-error:empty { display: none; }
 
-.attach-row { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px dashed var(--border); }
-.attach-row:empty { display: none; }
+.attach-row { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px dashed var(--border); }
+.attach-row:empty { display: none; margin-bottom: 0; }
 
 .attach-chip {
   display: flex; align-items: center; gap: 6px;
@@ -431,7 +431,7 @@ h1 {
 .attach-chip button svg { width: 8px; height: 8px; }
 
 .save-hint {
-  margin: 12px 2px 0; font-size: 11.5px; color: var(--gold);
+  margin: 0 2px 12px; font-size: 11.5px; color: var(--gold);
   display: flex; align-items: center; gap: 6px;
 }
 .save-hint[hidden] { display: none; } /* an explicit `display` on a [hidden] element otherwise wins the cascade */
@@ -439,7 +439,7 @@ h1 {
 /* ---------- chat log (console talks to a real Claude agent — server/chat.js) ---------- */
 
 .chat-log {
-  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+  margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border);
   display: flex; flex-direction: column; gap: 10px;
   max-height: 360px; overflow-y: auto;
 }
@@ -516,14 +516,27 @@ h1 {
 
 body.is-workspace .hero-marketing,
 body.is-workspace #heroChips,
-body.is-workspace .pipeline,
-body.is-workspace #panelSection {
+body.is-workspace .pipeline {
   display: none;
 }
 
 body.is-workspace .hero {
   padding-top: clamp(28px, 5vh, 48px);
   padding-bottom: 0;
+}
+
+/* #panelSection stays visible in workspace mode, but by this point its
+   #previewCard has already been relocated into .workspace-right (see
+   enterWorkspaceMode in app.js) — only #scoreCard (the detailed 7-metric
+   breakdown) is left inside it, so it collapses to a single centered
+   column and renders BELOW the chat+preview workspace instead of its
+   normal side-by-side spot. The compact ring above chat (#wsScore) stays
+   the only score readout up top. */
+body.is-workspace #panelSection {
+  grid-template-columns: 1fr;
+  max-width: 720px;
+  margin: 0 auto 96px;
+  padding: 0 24px;
 }
 
 .workspace { display: none; }
@@ -552,8 +565,19 @@ body.is-workspace .hero {
   display: flex; align-items: center; gap: 14px;
   border-radius: 18px; border: 1px solid var(--border);
   background: #FFFFFF; padding: 16px 18px;
+  cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .ws-score[hidden] { display: none; }
+.ws-score:hover, .ws-score:focus-visible {
+  border-color: var(--border-strong);
+  box-shadow: 0 10px 24px -16px rgba(26,21,16,0.28);
+  outline: none;
+}
+.ws-score-view {
+  flex: none; width: 15px; height: 15px; color: var(--text-faint);
+  align-self: center; transition: transform 0.15s ease;
+}
+.ws-score:hover .ws-score-view { transform: translateY(2px); }
 
 .ws-score-ring { position: relative; width: 52px; height: 52px; flex: none; }
 .ws-score-ring svg { width: 100%; height: 100%; }
@@ -567,7 +591,7 @@ body.is-workspace .hero {
   font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums;
 }
 
-.ws-score-info { min-width: 0; }
+.ws-score-info { min-width: 0; flex: 1 1 auto; }
 .ws-score-title { font-size: 14px; font-weight: 600; margin: 0 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-score-status { font-size: 10.5px; letter-spacing: 0.03em; color: var(--violet); }
 

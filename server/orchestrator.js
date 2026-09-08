@@ -40,6 +40,7 @@ const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { EDITABLE_FIELDS } = require('./validate');
 const { auditWebsite, auditImprovements } = require('./audit');
+const places = require('./places');
 const { validatePage, validateProject } = require('./orchestratorValidate');
 const { planSiteLocal, profileBrief } = require('./generate');
 const {
@@ -317,7 +318,12 @@ function localMultiPagePlan(profile, score, study) {
     navigation: pages.map((p) => p.nav_label),
     design_system: { accentColor: base.accentColor, tone: base.tone },
     seo_strategy: base.seo,
-    aeo_geo_strategy: { faq: base.aeoFaq || [], local_notes: profile.map ? 'Has a map/location link on file.' : 'No map/location link on file yet — add one to strengthen local search.' },
+    aeo_geo_strategy: {
+      faq: base.aeoFaq || [],
+      local_notes: profile.placeInfo && profile.placeInfo.formattedAddress
+        ? `Verified Google Business Profile on file — ${places.placeSummaryLine(profile.placeInfo)}.`
+        : profile.map ? 'Has a map/location link on file.' : 'No map/location link on file yet — add one to strengthen local search.'
+    },
     responsive_requirements: 'Mobile-first, single column below 640px.',
     missing_information: study.missing || []
   };

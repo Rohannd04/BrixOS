@@ -215,6 +215,20 @@
     renderScoreUI();
   }
 
+  // The compact score ring now sits above chat while the full 7-metric
+  // breakdown lives further down the page (see #panelSection in workspace
+  // mode) — make the compact card a quick jump link down to it.
+  wsScore.addEventListener('click', function () {
+    var target = $('panelSection');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  wsScore.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      wsScore.click();
+    }
+  });
+
   // topbar status pill: "ONLINE" once a real model provider (Anthropic or
   // OpenRouter — see server/llm.js) is configured on the server; "LOCAL MODE"
   // when the chat/generate agents are running on the rule-based fallback

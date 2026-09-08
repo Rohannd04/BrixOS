@@ -16,6 +16,7 @@ const generate = require('./generate');
 const chat = require('./chat');
 const llm = require('./llm');
 const { auditWebsite, auditImprovements } = require('./audit');
+const places = require('./places');
 const { analyzeUploadedFile } = require('./fileAnalysis');
 const { buildOrchestratorRouter } = require('./orchestratorRoutes');
 
@@ -202,6 +203,7 @@ app.put('/api/profile/:field', requireAuth, async (req, res) => {
   const db = readDB();
   const profile = getProfile(db, req.session.userId);
   const changed = field === 'website' && profile.website !== check.value;
+  const mapChanged = field === 'map' && profile.map !== check.value;
   profile[field] = check.value;
   writeDB(db);
 
@@ -218,7 +220,28 @@ app.put('/api/profile/:field', requireAuth, async (req, res) => {
     improvements = auditImprovements(audit);
   }
 
-  res.json(Object.assign(profilePayload(profile), improvements ? { improvements } : {}));
+  // A map/location link is the other field BrixOS can actually go verify —
+  // when a Google Places API key is configured (server/places.js), saving
+  // or changing it fetches the real Google Business Profile: name,
+  // category, address, phone, hours, rating, and photos, synchronously,
+  // the same pattern as the website audit above.
+  let placeResult;
+  if (mapChanged && places.configured()) {
+    placeResult = await places.enrichFromMapsLink(check.value);
+    if (placeResult.ok) {
+      profile.placeInfo = placeResult.place;
+      if (!profile.business && placeResult.place.name) profile.business = placeResult.place.name;
+      if (placeResult.photos.length) profile.photos = profile.photos.concat(placeResult.photos);
+      writeDB(db);
+    }
+  }
+
+  res.json(Object.assign(
+    profilePayload(profile),
+    improvements ? { improvements } : {},
+    placeResult && placeResult.ok ? { placeInfo: placeResult.place, photosAdded: placeResult.photos.length } : {},
+    placeResult && !placeResult.ok ? { placeError: placeResult.reason } : {}
+  ));
 });
 
 app.delete('/api/profile/:field', requireAuth, (req, res) => {

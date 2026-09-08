@@ -44,6 +44,7 @@ const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS } = require('./validate');
 const { isConfigured, planSiteLocal, buildSiteLocal } = require('./generate');
 const { auditWebsite, auditImprovements, auditSummaryLine } = require('./audit');
+const places = require('./places');
 const { pickReasoningProvider, needsClaudeDecision } = require('./providerPolicy');
 const orchestrator = require('./orchestrator');
 
@@ -54,7 +55,9 @@ const SAVE_FIELD_TOOL = {
   description:
     'Save one field to the signed-in user\'s BrixOS profile — the same fields the "+" menu on the page collects. ' +
     'Call this whenever the user tells you a piece of business info in plain conversation (their business name, ' +
-    'a link, an email) rather than making them click through the menu themselves.',
+    'a link, an email) rather than making them click through the menu themselves. Saving a "map" field (a Google ' +
+    'Maps / location link) fetches the real Google Business Profile behind it — name, category, address, phone, ' +
+    'hours, rating, and photos — when it resolves successfully.',
   input_schema: {
     type: 'object',
     required: ['field', 'value'],
@@ -109,7 +112,10 @@ function systemPrompt(profile, score) {
     'What you can actually do (use the tools — don\'t just say you will):\n' +
     '- If the user mentions their business name, a website/Instagram/Facebook/social/map link, or an email, ' +
     'call save_profile_field to store it. Saving a website triggers a real, live audit of that page — the tool ' +
-    'result will hand you the actual findings; report the specific ones, not generic advice.\n' +
+    'result will hand you the actual findings; report the specific ones, not generic advice. Saving a map link ' +
+    'similarly pulls the real Google Business Profile (category, address, phone, hours, rating, photos) when a ' +
+    'Places API key is configured — report those specifics too, and never claim to have fetched a listing if the ' +
+    'tool result says it couldn\'t.\n' +
     '- If the user asks you to build/generate/rebuild/redesign their site, call generate_site. It runs off ' +
     'whatever is already saved — if hardly anything is saved yet, still go ahead (it does its best), but you ' +
     'can also suggest they share more first. It runs in the background — say so, don\'t claim it\'s instant.\n' +
@@ -170,6 +176,7 @@ async function sendMessage(message, history, userId) {
       if (!check.ok) return `Rejected: ${check.message}`;
 
       const websiteChanged = field === 'website' && profile.website !== check.value;
+      const mapChanged = field === 'map' && profile.map !== check.value;
       profile[field] = check.value;
       writeDB(db);
 
@@ -184,6 +191,26 @@ async function sendMessage(message, history, userId) {
         writeDB(db);
         resultText += ` Live audit of that site — ${auditSummaryLine(audit)}. ` +
           'Mention the specific issues found (not a generic list) and what to fix first.';
+      }
+
+      if (mapChanged && places.configured()) {
+        // A map link is the other field BrixOS can go verify for real — via
+        // the Google Places API (server/places.js) rather than scraping the
+        // map page itself (it's client-rendered, so a plain fetch would see
+        // nothing). Fetches the real Google Business Profile: category,
+        // address, phone, hours, rating, and photos.
+        const placeResult = await places.enrichFromMapsLink(check.value);
+        if (placeResult.ok) {
+          profile.placeInfo = placeResult.place;
+          if (!profile.business && placeResult.place.name) profile.business = placeResult.place.name;
+          if (placeResult.photos.length) profile.photos = profile.photos.concat(placeResult.photos);
+          writeDB(db);
+          resultText += ` Pulled the real Google Business Profile — ${places.placeSummaryLine(placeResult.place)}` +
+            (placeResult.photos.length ? `, and grabbed ${placeResult.photos.length} real photo(s) from the listing.` : '.') +
+            ' Mention the specific category/rating/hours/address found — this is real, verified data, not a guess.';
+        } else {
+          resultText += ` Tried to pull the Google Business Profile from that link but couldn't (${placeResult.reason}) — continue with what's already known, don't claim to have fetched anything.`;
+        }
       }
 
       score = computeScores(profile);
@@ -295,6 +322,7 @@ async function sendMessageLocal(message, history, userId) {
   let websiteAudit = null;
 
   const found = extractFieldsLocal(message);
+  let placeResult = null;
   for (const field of Object.keys(found)) {
     if (!EDITABLE_FIELDS.includes(field)) continue;
     const check = validateField(field, found[field]);
@@ -302,6 +330,14 @@ async function sendMessageLocal(message, history, userId) {
       if (field === 'website' && profile.website !== check.value) {
         websiteAudit = await auditWebsite(check.value);
         profile.siteAudit = websiteAudit;
+      }
+      if (field === 'map' && profile.map !== check.value && places.configured()) {
+        placeResult = await places.enrichFromMapsLink(check.value);
+        if (placeResult.ok) {
+          profile.placeInfo = placeResult.place;
+          if (!profile.business && placeResult.place.name) profile.business = placeResult.place.name;
+          if (placeResult.photos.length) profile.photos = profile.photos.concat(placeResult.photos);
+        }
       }
       profile[field] = check.value;
       savedFields.push(field);
@@ -333,7 +369,19 @@ async function sendMessageLocal(message, history, userId) {
     const improvements = auditImprovements(websiteAudit);
     reply = `Studied your site — presence score is ${score.overall}/100 right now. ` +
       (improvements.length ? "Here's what I'd fix first: " + improvements.slice(0, 3).join(' ') : '') +
+      (placeResult && placeResult.ok ? ` Also pulled your Google listing — ${places.placeSummaryLine(placeResult.place)}.` : '') +
       (missing.length ? ` Adding ${missing.slice(0, 2).join(' and ')} would round out the rest of your profile.` : '');
+  } else if (savedFields.length && placeResult && placeResult.ok) {
+    // Same idea as the website-audit branch above, but for a map link —
+    // this is real, verified Google Business Profile data, so lead with it
+    // instead of a generic "saved" acknowledgment.
+    reply = `Pulled your Google listing — ${places.placeSummaryLine(placeResult.place)}` +
+      (placeResult.photos.length ? `. Grabbed ${placeResult.photos.length} real photo${placeResult.photos.length > 1 ? 's' : ''} from it too.` : '.') +
+      ` Presence score is ${score.overall}/100.` +
+      (missing.length ? ` Adding ${missing.slice(0, 2).join(' and ')} would round it out further.` : ' Say "build my site" and I\'ll use all of this in the rebuild.');
+  } else if (savedFields.length && placeResult && !placeResult.ok) {
+    reply = `Saved your map link, but couldn't pull the listing details (${placeResult.reason}). Presence score is ${score.overall}/100 from what's saved.` +
+      (missing.length ? ` Adding ${missing.slice(0, 3).join(', ')} would improve it further.` : '');
   } else if (savedFields.length) {
     reply = `Got it — saved your ${savedFields.join(' and ')}. Presence score is ${score.overall}/100 so far.` +
       (missing.length

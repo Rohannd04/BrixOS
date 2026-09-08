@@ -59,6 +59,11 @@ function emptyProfile() {
     fileInsights: [],
     generatedSite: null, // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
     siteAudit: null, // real fetched-page analysis for `website` — set whenever it's saved/changed, see server/audit.js
+    // Real, fetched Google Business Profile data for `map` — set whenever it's
+    // saved/changed and GOOGLE_PLACES_API_KEY is configured, see server/places.js.
+    // { name, formattedAddress, category, types, primaryType, phone, website,
+    //   rating, userRatingCount, openNow, weekdayDescriptions, fetchedAt }
+    placeInfo: null,
 
     // BrixOS Orchestrator (server/orchestrator.js) state — separate from the
     // simpler one-shot generatedSite above:

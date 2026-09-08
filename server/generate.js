@@ -100,6 +100,20 @@ function profileBrief(profile) {
   if (profile.social) lines.push('Other social: ' + profile.social);
   if (profile.map) lines.push('Map / location link: ' + profile.map);
   if (profile.gmail) lines.push('Contact email: ' + profile.gmail);
+
+  // Real, fetched Google Business Profile data (server/places.js) — when
+  // present, this is verified fact, not something to re-derive or guess at.
+  const place = profile.placeInfo;
+  if (place) {
+    const bits = [];
+    if (place.category) bits.push('business type: ' + place.category);
+    if (place.formattedAddress) bits.push('address: ' + place.formattedAddress);
+    if (place.phone) bits.push('phone: ' + place.phone);
+    if (typeof place.rating === 'number') bits.push('rating: ' + place.rating + ' (' + (place.userRatingCount || 0) + ' reviews)');
+    if (place.openNow !== null) bits.push(place.openNow ? 'currently open' : 'currently closed');
+    if (place.weekdayDescriptions && place.weekdayDescriptions.length) bits.push('hours: ' + place.weekdayDescriptions.join('; '));
+    lines.push('Verified Google Business Profile (fetched live from the map link) — ' + bits.join(', ') + '. Use this real data — do not invent conflicting details.');
+  }
   lines.push('Photos uploaded: ' + (profile.photos ? profile.photos.length : 0));
   lines.push('Files uploaded: ' + (profile.files ? profile.files.length : 0));
 
@@ -228,26 +242,44 @@ function escapeHtml(str) {
 }
 
 function planSiteLocal(profile, score) {
-  const siteName = String(profile.business || '').trim() || 'Your Business';
+  // Real, fetched Google Business Profile data (server/places.js) — this
+  // deterministic no-AI planner has no model to weave it in narratively,
+  // so it slots the verified facts straight into the copy instead of
+  // falling back to generic filler wherever they're available.
+  const place = profile.placeInfo;
+  const siteName = String(profile.business || (place && place.name) || '').trim() || 'Your Business';
   const tagline = profile.website
     ? 'Everything customers liked about your site — sharper, faster, and easier to shop.'
-    : 'Quality and service worth showing off — built for the customers walking by today.';
+    : place && place.category
+      ? `Real ${place.category} quality and service — built for the customers walking by today.`
+      : 'Quality and service worth showing off — built for the customers walking by today.';
+
+  const hoursLine = place && place.weekdayDescriptions && place.weekdayDescriptions.length
+    ? place.weekdayDescriptions.join(' · ')
+    : '';
+  const contactBody = place && place.formattedAddress
+    ? `Find us at ${place.formattedAddress}.` + (hoursLine ? ` Hours: ${hoursLine}.` : '')
+    : profile.map
+      ? 'Find us in person or reach out online — we’d love to hear from you.'
+      : 'Reach out any time, however’s easiest for you.';
 
   const sections = [
     { type: 'hero', headline: `Welcome to ${siteName}`, body: tagline, cta: 'Get in touch' },
     {
       type: 'about',
       headline: 'Our Story',
-      body: `${siteName} is a local favorite built on quality and service — this section is where that story gets told.`
+      body: place && place.category
+        ? `${siteName} is a local ${place.category} built on quality and service — this section is where that story gets told.`
+        : `${siteName} is a local favorite built on quality and service — this section is where that story gets told.`
     },
     {
       type: 'products',
       headline: 'What We Offer',
       body: 'A closer look at the products and services customers come back for.'
     },
-    profile.map
-      ? { type: 'contact', headline: 'Visit Us', body: 'Find us in person or reach out online — we’d love to hear from you.', cta: 'Get directions' }
-      : { type: 'contact', headline: 'Get In Touch', body: 'Reach out any time, however’s easiest for you.', cta: 'Contact us' }
+    (profile.map || (place && place.formattedAddress))
+      ? { type: 'contact', headline: 'Visit Us', body: contactBody, cta: 'Get directions' }
+      : { type: 'contact', headline: 'Get In Touch', body: contactBody, cta: 'Contact us' }
   ];
 
   return {
@@ -260,11 +292,19 @@ function planSiteLocal(profile, score) {
     seo: {
       title: `${siteName} — Official Site`,
       description: tagline,
-      keywords: [siteName.toLowerCase(), 'local business', 'shop near me']
+      keywords: [siteName.toLowerCase(), place && place.category, 'local business', 'shop near me'].filter(Boolean)
     },
     aeoFaq: [
-      { q: `What does ${siteName} sell?`, a: 'A curated selection built around what local customers ask for most.' },
-      { q: `Where is ${siteName} located?`, a: profile.map ? 'See the map link on this page for directions.' : 'Contact the business directly for location details.' }
+      {
+        q: `What does ${siteName} sell?`,
+        a: place && place.category ? `A ${place.category} offering a curated selection built around what local customers ask for most.` : 'A curated selection built around what local customers ask for most.'
+      },
+      {
+        q: `Where is ${siteName} located?`,
+        a: place && place.formattedAddress
+          ? `${siteName} is located at ${place.formattedAddress}.` + (hoursLine ? ` Hours: ${hoursLine}.` : '')
+          : profile.map ? 'See the map link on this page for directions.' : 'Contact the business directly for location details.'
+      }
     ]
   };
 }

@@ -35,6 +35,11 @@
     <div class="console">
       <div class="console-glow" aria-hidden="true"></div>
       <div class="console-box">
+        <!-- Chat log renders ABOVE the composer (Claude/ChatGPT-style): messages
+             stack here, the input row stays pinned at the bottom below. -->
+        <div class="chat-log" id="chatLog" hidden></div>
+        <div class="attach-row" id="attachRow"></div>
+        <p class="save-hint" id="saveHint" hidden>Sign in so BrixOS can save this scan to your account.</p>
         <div class="console-input-row">
           <div class="plus-wrap">
             <button class="icon-btn" id="plusBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Add business details">
@@ -47,9 +52,6 @@
             <svg viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6 11l6-6 6 6" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </div>
-        <div class="attach-row" id="attachRow"></div>
-        <p class="save-hint" id="saveHint" hidden>Sign in so BrixOS can save this scan to your account.</p>
-        <div class="chat-log" id="chatLog" hidden></div>
       </div>
     </div>
 
@@ -62,7 +64,7 @@
 
   <div class="workspace" id="workspaceView" hidden>
     <div class="workspace-left" id="workspaceLeft">
-      <div class="ws-score" id="wsScore" hidden>
+      <div class="ws-score" id="wsScore" hidden role="button" tabindex="0" aria-label="View full score breakdown">
         <div class="ws-score-ring">
           <svg viewBox="0 0 56 56" aria-hidden="true">
             <circle class="ws-ring-track" cx="28" cy="28" r="24"/>
@@ -74,6 +76,7 @@
           <div class="ws-score-title display" id="wsScoreTitle">Live scan</div>
           <div class="ws-score-status mono" id="wsScoreStatus">Add details to run a scan</div>
         </div>
+        <svg class="ws-score-view" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       <div class="ws-improve" id="wsImprove" hidden>
         <span class="ws-improve-label mono">SECTIONS TO IMPROVE</span>
