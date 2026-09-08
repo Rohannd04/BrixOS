@@ -69,8 +69,16 @@ function providerName() {
 // ---------------------------------------------------------------------------
 
 const MODEL_CACHE_MS = 60 * 60 * 1000; // re-check hourly — free-tier lineups change
-let cachedModel = null;
+let cachedPool = null; // sorted array of candidate model ids
 let cachedAt = 0;
+
+// Some free models pass every filter below (free, tool-capable per their
+// listing) but still reject real requests — e.g. OpenRouter restricts a
+// few free models to "agentic harness" clients only, which isn't visible
+// anywhere in the /models metadata, only by actually trying to call them.
+// Anything that fails a real call gets blacklisted for the rest of this
+// process so the next request skips straight past it.
+const badModels = new Set();
 
 function isFreeModel(m) {
   const p = m.pricing || {};
@@ -90,7 +98,7 @@ async function fetchOpenRouterModelList() {
   return Array.isArray(data.data) ? data.data : [];
 }
 
-async function pickOpenRouterModel() {
+async function fetchSortedFreeModelPool() {
   const models = await fetchOpenRouterModelList();
   const free = models.filter(isFreeModel);
   if (!free.length) throw new Error('NO_FREE_MODEL_AVAILABLE');
@@ -99,25 +107,49 @@ async function pickOpenRouterModel() {
   // Bigger context window is a rough, cheap proxy for "more capable" when
   // there's no other signal to rank free models by.
   pool.sort((a, b) => (b.context_length || 0) - (a.context_length || 0));
-  return pool[0].id;
+  return pool.map((m) => m.id);
 }
 
+async function getModelPool() {
+  const now = Date.now();
+  if (cachedPool && (now - cachedAt) < MODEL_CACHE_MS) return cachedPool;
+  cachedPool = await fetchSortedFreeModelPool();
+  cachedAt = now;
+  return cachedPool;
+}
+
+// Returns the best candidate to try next: the top-ranked free model that
+// hasn't already failed this session, falling back to the hardcoded
+// last-resort constant, and only throwing if every option is exhausted.
+// A manually pinned OPENROUTER_MODEL always wins and is never blacklisted
+// — if that one is wrong, that's the user's call to fix, not ours to
+// route around.
 async function getOpenRouterModel() {
   if (process.env.OPENROUTER_MODEL) return process.env.OPENROUTER_MODEL;
 
-  const now = Date.now();
-  if (cachedModel && (now - cachedAt) < MODEL_CACHE_MS) return cachedModel;
-
   try {
-    const picked = await pickOpenRouterModel();
-    cachedModel = picked;
-    cachedAt = now;
-    console.log(`[BrixOS] OpenRouter: auto-selected free model "${picked}"`);
-    return picked;
+    const pool = await getModelPool();
+    const candidate = pool.find((id) => !badModels.has(id));
+    if (candidate) {
+      console.log(`[BrixOS] OpenRouter: using free model "${candidate}"`);
+      return candidate;
+    }
   } catch (err) {
-    console.warn(`[BrixOS] OpenRouter: live model lookup failed (${err.message}) — falling back to "${OPENROUTER_FALLBACK_MODEL}". Set OPENROUTER_MODEL in .env to pin one yourself.`);
+    console.warn(`[BrixOS] OpenRouter: live model lookup failed (${err.message}).`);
+  }
+
+  if (!badModels.has(OPENROUTER_FALLBACK_MODEL)) {
+    console.warn(`[BrixOS] OpenRouter: falling back to "${OPENROUTER_FALLBACK_MODEL}". Set OPENROUTER_MODEL in .env to pin one yourself.`);
     return OPENROUTER_FALLBACK_MODEL;
   }
+
+  throw new Error('NO_WORKING_OPENROUTER_MODEL');
+}
+
+function markOpenRouterModelBad(model, reason) {
+  if (process.env.OPENROUTER_MODEL) return; // never route around a manual pin
+  badModels.add(model);
+  console.warn(`[BrixOS] OpenRouter: model "${model}" failed (${reason}) — trying the next candidate.`);
 }
 
 // Resolve the model once at startup, purely so the console shows what's
@@ -168,6 +200,28 @@ async function callOpenRouter({ model, system, messages, tools, forceToolName, m
   return data;
 }
 
+// Wraps callOpenRouter with fallback across candidates: some free models
+// pass every filter but still reject real requests for reasons invisible
+// in their listing (see badModels above) — this tries the next-best
+// candidate instead of failing the whole request outright. A manually
+// pinned OPENROUTER_MODEL is tried exactly once, since routing around an
+// explicit pin would be surprising.
+async function callOpenRouterWithRetry(args) {
+  const maxAttempts = process.env.OPENROUTER_MODEL ? 1 : 3;
+  let lastErr;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const model = await getOpenRouterModel();
+    try {
+      const data = await callOpenRouter({ ...args, model });
+      return { data, model };
+    } catch (err) {
+      lastErr = err;
+      markOpenRouterModelBad(model, err.message);
+    }
+  }
+  throw lastErr;
+}
+
 // ---------------------------------------------------------------------------
 // Public calls
 // ---------------------------------------------------------------------------
@@ -193,8 +247,7 @@ async function chatOnce({ role, system, userText, tools, forceToolName, maxToken
   }
 
   if (PROVIDER === 'openrouter') {
-    const model = await getOpenRouterModel();
-    const data = await callOpenRouter({ model, system, messages: [{ role: 'user', content: userText }], tools, forceToolName, maxTokens });
+    const { data, model } = await callOpenRouterWithRetry({ system, messages: [{ role: 'user', content: userText }], tools, forceToolName, maxTokens });
     const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
     const toolCall = (msg.tool_calls || [])[0];
     return { text: (msg.content || '').trim(), toolInput: toolCall ? safeParseJson(toolCall.function.arguments) : null, model };
@@ -248,17 +301,17 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
   }
 
   if (PROVIDER === 'openrouter') {
-    const model = await getOpenRouterModel();
     const messages = historyMessages.concat([{ role: 'user', content: message }]);
+    let lastModel = null;
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      const data = await callOpenRouter({
-        model,
+      const { data, model } = await callOpenRouterWithRetry({
         system: typeof system === 'function' ? system() : system,
         messages,
         tools,
         maxTokens: 600
       });
+      lastModel = model;
       const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
       const toolCalls = msg.tool_calls || [];
       if (!toolCalls.length) {
@@ -271,7 +324,7 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
         messages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
       }
     }
-    return { text: "That took a few too many steps — try asking me one thing at a time?", model };
+    return { text: "That took a few too many steps — try asking me one thing at a time?", model: lastModel };
   }
 
   throw new Error('NOT_CONFIGURED');
