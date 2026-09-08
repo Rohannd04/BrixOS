@@ -31,7 +31,17 @@
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
-const PROVIDER = ANTHROPIC_KEY ? 'anthropic' : (OPENROUTER_KEY ? 'openrouter' : null);
+// Groq — a second, independent free-tier provider (console.groq.com, no
+// card required). OpenRouter's ":free" models share ONE account-wide
+// "requests per day" cap across every free model, so a busy day can burn
+// through the whole quota and every subsequent free-tier call fails with
+// the same "Rate limit exceeded: free-models-per-day" error until it
+// resets — discovered live when this happened mid-testing. Groq has its
+// own separate quota, so when it's configured it's used as an automatic
+// fallback the moment OpenRouter's free tier is unavailable (see
+// callFreeProviderWithRetry below), not a provider you pick explicitly.
+const GROQ_KEY = process.env.GROQ_API_KEY || '';
+const PROVIDER = ANTHROPIC_KEY ? 'anthropic' : ((OPENROUTER_KEY || GROQ_KEY) ? 'openrouter' : null);
 
 const ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
 const ANTHROPIC_MODELS = {
@@ -196,8 +206,11 @@ function markOpenRouterModelBad(model, reason) {
 }
 
 // Resolve the model once at startup, purely so the console shows what's
-// about to be used instead of only finding out on the first request.
-if (PROVIDER === 'openrouter') {
+// about to be used instead of only finding out on the first request. Only
+// meaningful when OpenRouter itself is actually configured — a Groq-only
+// setup has nothing to resolve here (Groq's candidate list is fixed; see
+// the startup log for it further down, once GROQ_MODEL_CANDIDATES exists).
+if (OPENROUTER_KEY) {
   getOpenRouterModel().catch(() => {});
 }
 
@@ -288,6 +301,119 @@ async function callOpenRouterWithRetry(args) {
 }
 
 // ---------------------------------------------------------------------------
+// Groq — second free-tier provider, used only as a fallback (see the
+// comment on GROQ_KEY above). Groq's API is OpenAI-compatible, same
+// request/response shape as OpenRouter's, so it slots into the exact same
+// data.choices[0].message parsing every caller already does.
+// ---------------------------------------------------------------------------
+
+const GROQ_TIMEOUT_MS = 25000;
+const GROQ_MODEL_CANDIDATES = process.env.GROQ_MODEL
+  ? [process.env.GROQ_MODEL]
+  : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+const badGroqModels = new Set();
+
+if (GROQ_KEY) {
+  console.log(`[BrixOS] Groq configured as a free-tier fallback (candidates: ${GROQ_MODEL_CANDIDATES.join(', ')}).`);
+}
+
+function markGroqModelBad(model, reason) {
+  if (process.env.GROQ_MODEL) return; // never route around a manual pin
+  badGroqModels.add(model);
+  console.warn(`[BrixOS] Groq: model "${model}" failed (${reason}) — trying the next candidate.`);
+}
+
+async function callGroq({ model, system, messages, tools, forceToolName, maxTokens }) {
+  const body = {
+    model,
+    max_tokens: maxTokens,
+    messages: system ? [{ role: 'system', content: system }].concat(messages) : messages
+  };
+  if (tools) body.tools = toOpenAiTools(tools);
+  if (forceToolName) body.tool_choice = { type: 'function', function: { name: forceToolName } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GROQ_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
+      throw new Error('GROQ_ERROR: ' + msg);
+    }
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`GROQ_ERROR: timed out after ${GROQ_TIMEOUT_MS / 1000}s`);
+    if (err.message && err.message.startsWith('GROQ_ERROR:')) throw err;
+    throw new Error('GROQ_ERROR: ' + err.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callGroqWithRetry(args) {
+  const candidates = GROQ_MODEL_CANDIDATES.filter((m) => !badGroqModels.has(m));
+  const tryList = candidates.length ? candidates : GROQ_MODEL_CANDIDATES; // all blacklisted? try anyway, last resort
+  let lastErr;
+  for (const model of tryList) {
+    try {
+      const data = await callGroq({ ...args, model });
+      return { data, model };
+    } catch (err) {
+      lastErr = err;
+      markGroqModelBad(model, err.message);
+    }
+  }
+  throw lastErr;
+}
+
+function groqConfigured() {
+  return Boolean(GROQ_KEY);
+}
+
+// The single entry point every free-tier caller (openRouterComplete,
+// runToolLoop's 'openrouter' branch) should use instead of calling
+// callOpenRouterWithRetry directly: try OpenRouter first (unchanged
+// behavior for everyone who only has that key), and only reach for Groq
+// if OpenRouter is either not configured or just failed outright — e.g.
+// its account-wide free-tier daily cap is exhausted. Silent no-op when
+// Groq isn't configured, so nothing changes for anyone who hasn't set
+// GROQ_API_KEY.
+async function callFreeProviderWithRetry(args) {
+  if (OPENROUTER_KEY) {
+    try {
+      return await callOpenRouterWithRetry(args);
+    } catch (err) {
+      if (!GROQ_KEY) throw err;
+      console.warn(`[BrixOS] OpenRouter free tier unavailable (${err.message}) — falling back to Groq.`);
+    }
+  }
+  if (GROQ_KEY) return callGroqWithRetry(args);
+  throw new Error('NOT_CONFIGURED');
+}
+
+// A dud (empty) reply's model id may have come from either provider — blacklist
+// it wherever it actually belongs rather than assuming OpenRouter. The two
+// providers' model id formats never collide (OpenRouter's are
+// "vendor/model[:free]"; Groq's are bare names), so checking the candidate
+// lists is unambiguous.
+function markFreeModelBad(model, reason) {
+  if (GROQ_MODEL_CANDIDATES.includes(model)) {
+    markGroqModelBad(model, reason);
+  } else {
+    markOpenRouterModelBad(model, reason);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public calls
 // ---------------------------------------------------------------------------
 
@@ -318,7 +444,7 @@ async function anthropicComplete({ role, system, userText, tools, forceToolName,
 }
 
 async function openRouterComplete({ system, userText, tools, forceToolName, maxTokens }) {
-  if (!OPENROUTER_KEY) throw new Error('NOT_CONFIGURED');
+  if (!OPENROUTER_KEY && !GROQ_KEY) throw new Error('NOT_CONFIGURED');
   const messages = [{ role: 'user', content: userText }];
 
   // Same dud-reply problem runToolLoop() guards against (see
@@ -333,7 +459,7 @@ async function openRouterComplete({ system, userText, tools, forceToolName, maxT
   let data, model, msg, toolCall;
   let emptyAttempts = 0;
   for (;;) {
-    ({ data, model } = await callOpenRouterWithRetry({ system, messages, tools, forceToolName, maxTokens }));
+    ({ data, model } = await callFreeProviderWithRetry({ system, messages, tools, forceToolName, maxTokens }));
     msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
     toolCall = (msg.tool_calls || [])[0];
     const content = (msg.content || '').trim();
@@ -341,7 +467,7 @@ async function openRouterComplete({ system, userText, tools, forceToolName, maxT
     if (hasUsableOutput) break;
     emptyAttempts++;
     if (emptyAttempts > EMPTY_REPLY_RETRIES) break;
-    markOpenRouterModelBad(model, 'empty reply (no text, no tool call)');
+    markFreeModelBad(model, 'empty reply (no text, no tool call)');
   }
 
   return { text: (msg.content || '').trim(), toolInput: toolCall ? safeParseJson(toolCall.function.arguments) : null, model };
@@ -379,7 +505,12 @@ function claudeConfigured() {
 }
 
 function openRouterConfigured() {
-  return Boolean(OPENROUTER_KEY);
+  // Labeled "openRouter" for backward compatibility (this is what every
+  // caller checks to decide whether the free/cheap tier is usable at all),
+  // but true whenever EITHER free provider is configured — Groq is an
+  // automatic fallback inside the same call path, not a separately-picked
+  // provider, so callers never need to know which one actually ran.
+  return Boolean(OPENROUTER_KEY || GROQ_KEY);
 }
 
 async function callClaudeDirect(args) {
@@ -476,7 +607,7 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
       // whole conversational turn — it just tries the next free-model
       // candidate a couple more times before this turn gives up.
       for (;;) {
-        ({ data, model } = await callOpenRouterWithRetry({
+        ({ data, model } = await callFreeProviderWithRetry({
           system: typeof system === 'function' ? system() : system,
           messages,
           tools,
@@ -489,7 +620,7 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
         if (toolCalls.length || content) break;
         emptyAttempts++;
         if (emptyAttempts > EMPTY_REPLY_RETRIES) break;
-        markOpenRouterModelBad(model, 'empty reply (no text, no tool call)');
+        markFreeModelBad(model, 'empty reply (no text, no tool call)');
       }
 
       if (!toolCalls.length) {
@@ -511,5 +642,5 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
 module.exports = {
   isConfigured, providerName, chatOnce, runToolLoop,
   // orchestrator-facing direct provider access (see the comment above)
-  claudeConfigured, openRouterConfigured, callClaudeDirect, callOpenRouterDirect
+  claudeConfigured, openRouterConfigured, groqConfigured, callClaudeDirect, callOpenRouterDirect
 };
