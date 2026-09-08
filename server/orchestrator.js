@@ -170,9 +170,18 @@ const ORCHESTRATOR_PLAN_TOOL = {
                 required: ['type', 'headline', 'body'],
                 properties: {
                   type: { type: 'string', description: 'hero | about | products | gallery | testimonial | contact | faq | cta' },
-                  headline: { type: 'string' },
-                  body: { type: 'string' },
-                  cta: { type: 'string' }
+                  headline: {
+                    type: 'string',
+                    description: 'The EXACT heading text to display on the page, ready to publish as-is, e.g. "Comfort today. Better tomorrow." Never a description of what the heading should say, and never a label like "Headline:".'
+                  },
+                  body: {
+                    type: 'string',
+                    description: 'The EXACT paragraph text to display on the page, ready to publish as-is — one or two real, finished sentences. Never a description, summary, or restatement of the headline/cta. WRONG: "Hero headline: \'Comfort today.\' Subline: \'Better tomorrow.\' CTA: \'Book now\'." RIGHT: "Safe, all-inclusive stay so you can focus on work."'
+                  },
+                  cta: {
+                    type: 'string',
+                    description: 'The exact button label only, e.g. "Book a visit" — two to four words, never a full sentence and never a label like "CTA:".'
+                  }
                 }
               }
             }
@@ -219,7 +228,21 @@ const MODIFY_PAGE_TOOL = {
         items: {
           type: 'object',
           required: ['type', 'headline', 'body'],
-          properties: { type: { type: 'string' }, headline: { type: 'string' }, body: { type: 'string' }, cta: { type: 'string' } }
+          properties: {
+            type: { type: 'string', description: 'hero | about | products | gallery | testimonial | contact | faq | cta' },
+            headline: {
+              type: 'string',
+              description: 'The EXACT heading text to display on the page, ready to publish as-is. Never a description of what the heading should say, and never a label like "Headline:".'
+            },
+            body: {
+              type: 'string',
+              description: 'The EXACT paragraph text to display on the page, ready to publish as-is — one or two real, finished sentences. Never a description, summary, or restatement of the headline/cta (e.g. never write "Headline: \'...\' Subline: \'...\' CTA: \'...\'").'
+            },
+            cta: {
+              type: 'string',
+              description: 'The exact button label only, e.g. "Book a visit" — two to four words, never a full sentence and never a label like "CTA:".'
+            }
+          }
         }
       }
     }
@@ -321,7 +344,15 @@ async function stagePlan(job, profile, score, study, reasoning) {
           'type entirely. If a fact isn\'t given, list it under missing_information instead of inventing it. The ' +
           'seo_strategy.keywords array should be 3-5 short, real phrases about this specific business (e.g. ' +
           '"handmade pottery", "Austin TX", "walk-ins welcome") — they double as a highlight strip on the homepage, ' +
-          'so keep each one under 25 characters and concrete. Always call submit_orchestrator_plan exactly once.',
+          'so keep each one under 25 characters and concrete. Each section\'s headline/body/cta fields must contain ' +
+          'the FINAL, literal text to display on the page — never a description of what that text should say. For ' +
+          'example, if a hero should announce "Furnished PG for Gents in Bangalore — 3 Meals a Day" with the sub-line ' +
+          '"Safe, all-inclusive stay so you can focus on work" and a "Call to Book" button, write EXACTLY that: ' +
+          'headline = "Furnished PG for Gents in Bangalore — 3 Meals a Day", body = "Safe, all-inclusive stay so you ' +
+          'can focus on work.", cta = "Call to Book". Do NOT write something like headline = "Your All-Inclusive PG ' +
+          'in Bangalore" with body = "Hero headline: \'Furnished PG for Gents...\'. Subline: \'Safe, all-inclusive ' +
+          'stay...\'. CTA: \'Call to Book\'." — that meta-description format is wrong and must never appear. Always ' +
+          'call submit_orchestrator_plan exactly once.',
         userText: 'Here is everything currently known about this business:\n\n' + study.brief + '\n\nPlan its rebuilt website now.',
         tools: [ORCHESTRATOR_PLAN_TOOL],
         forceToolName: 'submit_orchestrator_plan',
@@ -542,7 +573,10 @@ async function runModifyJob(job, instruction) {
           system:
             'You are the BrixOS Orchestrator handling a follow-up change request on an already-generated website. ' +
             'Decide which existing page it applies to and return that page\'s FULL, updated section list — keep ' +
-            'unrelated sections as they are, only change what the user asked for. Call submit_page_update exactly once.',
+            'unrelated sections as they are, only change what the user asked for. Every section\'s headline/body/cta ' +
+            'must be the FINAL, literal text to display on the page, ready to publish as-is — never a description ' +
+            'of what that text should say (e.g. never write something like "Headline: \'...\' Subline: \'...\' CTA: ' +
+            '\'...\'"). Call submit_page_update exactly once.',
           userText:
             'Existing pages: ' + plan.pages.map((p) => `${p.slug} (sections: ${p.sections.map((s) => s.headline).join(', ')})`).join(' | ') +
             '\n\nUser\'s request: ' + instruction,
