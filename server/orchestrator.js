@@ -407,6 +407,30 @@ function contactLinksHtml(profile) {
   return links;
 }
 
+// Inline guard script embedded in every generated page. BrixOS's own
+// preview renders a page inside a sandboxed `srcdoc` iframe (no
+// allow-same-origin) so the user can see it without ever leaving the app.
+// Relative links like "contact.html" inside a srcdoc document resolve
+// against the OUTER embedding page's real URL though, and clicking one
+// makes the iframe navigate itself to that (nonexistent, server-side) route
+// — producing a raw "Cannot GET /contact.html" instead of staying inside
+// the preview. This script only disarms internal .html links while the
+// page is actually embedded (window.self !== window.top); once the site is
+// exported as a ZIP and the files are opened directly in a browser,
+// window.self === window.top and every link works exactly as a normal,
+// real website's would.
+const PREVIEW_SAFE_NAV_SCRIPT = `<script>
+(function(){
+  if (window.self === window.top) return;
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (/^[a-zA-Z0-9_-]+\\.html(#.*)?$/.test(href)) { e.preventDefault(); }
+  }, true);
+})();
+</` + `script>`;
+
 // Dependency-free, no-API-key page template — used whenever neither
 // OpenRouter nor an approved Claude is available. Deliberately plain but
 // real: every planned section actually renders, the nav links to every
@@ -452,6 +476,7 @@ function renderLocalPage(task, plan, profile, allTasks) {
   </header>
   ${sectionsHtml}
   <footer>${links.length ? links.join(' &middot; ') + ' &middot; ' : ''}Built with BrixOS</footer>
+  ${PREVIEW_SAFE_NAV_SCRIPT}
 </body>
 </html>`;
 }
@@ -469,7 +494,25 @@ const ORCHESTRATOR_BUILDER_SYSTEM =
   '- Do not invent fake customer reviews, fake awards, or fake press mentions, and do not invent business facts ' +
   'that were listed as missing — use only what is given.\n' +
   '- Include semantic HTML (a real <h1> for the first section), a viewport meta tag, and on-page SEO (title, meta ' +
-  'description) from the given SEO fields.';
+  'description) from the given SEO fields.\n' +
+  '- Do not add any click handlers that call preventDefault() on internal navigation links — BrixOS handles ' +
+  'preview-safe navigation itself by injecting its own script into the file after you return it.';
+
+// Deterministically ensures every generated page — model output or local
+// template — carries the preview-safe-navigation guard, regardless of
+// whether the model followed the system prompt. Inserted just before
+// </body> (case-insensitive); appended at the end as a fallback if a
+// generated file is missing a closing </body> tag.
+function injectPreviewSafeNavScript(html) {
+  if (!html) return html;
+  if (html.includes(PREVIEW_SAFE_NAV_SCRIPT)) return html;
+  const closeBodyMatch = html.match(/<\/body\s*>/i);
+  if (closeBodyMatch) {
+    const idx = html.lastIndexOf(closeBodyMatch[0]);
+    return html.slice(0, idx) + PREVIEW_SAFE_NAV_SCRIPT + '\n' + html.slice(idx);
+  }
+  return html + PREVIEW_SAFE_NAV_SCRIPT;
+}
 
 async function generatePageHtml(task, plan, allTasks, profile, generation, fixNotes) {
   if (generation) {
@@ -491,7 +534,7 @@ async function generatePageHtml(task, plan, allTasks, profile, generation, fixNo
       maxTokens: 6000
     });
     const html = stripFences(text);
-    if (html) return { html, model, source: generation.provider };
+    if (html) return { html: injectPreviewSafeNavScript(html), model, source: generation.provider };
     // fall through to local template if the model returned nothing usable
   }
   return { html: renderLocalPage(task, plan, profile, allTasks), model: 'local-template', source: 'local' };
