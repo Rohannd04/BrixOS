@@ -124,54 +124,16 @@ function jobSummary(job) {
 // provider selection
 // ---------------------------------------------------------------------------
 
-// Reasoning (understand/study/plan/interpret-change-requests): Claude if
-// configured AND this account has approved paid usage, else the free
-// OpenRouter path, else null (caller uses a local, deterministic fallback).
-function pickReasoningProvider(profile) {
-  if (llm.claudeConfigured() && profile.claudeApprovalGranted === true) {
-    return { provider: 'claude', call: llm.callClaudeDirect };
-  }
-  if (llm.openRouterConfigured()) {
-    return { provider: 'openrouter', call: llm.callOpenRouterDirect };
-  }
-  return null;
-}
-
-// Generation (writing actual page HTML): OpenRouter first — that's the
-// point of using an open-source/free model as the "worker" — falling back
-// to Claude only if OpenRouter isn't configured but Claude is approved
-// (better to generate with a paid model the user already said yes to than
-// not generate at all).
-function pickGenerationProvider(profile) {
-  if (llm.openRouterConfigured()) {
-    return { provider: 'openrouter', call: llm.callOpenRouterDirect };
-  }
-  if (llm.claudeConfigured() && profile.claudeApprovalGranted === true) {
-    return { provider: 'claude', call: llm.callClaudeDirect };
-  }
-  return null;
-}
-
-// Claude is configured server-side but this account has never said yes or
-// no yet — BrixOS must ask before spending anything, exactly once per
-// account (the decision is then remembered on the profile).
-function needsClaudeDecision(profile) {
-  return llm.claudeConfigured() && profile.claudeApprovalGranted === null;
-}
-
-function getClaudeStatus(userId) {
-  const db = readDB();
-  const profile = getProfile(db, userId);
-  return { configured: llm.claudeConfigured(), approved: profile.claudeApprovalGranted };
-}
-
-function setClaudeApproval(userId, approve) {
-  const db = readDB();
-  const profile = getProfile(db, userId);
-  profile.claudeApprovalGranted = Boolean(approve);
-  writeDB(db);
-  return { configured: llm.claudeConfigured(), approved: profile.claudeApprovalGranted };
-}
+// Provider selection + the paid-Claude-usage approval gate now live in
+// server/providerPolicy.js, shared with server/chat.js so the whole app
+// enforces exactly one policy instead of two that could drift apart.
+const {
+  pickReasoningProvider,
+  pickGenerationProvider,
+  needsClaudeDecision,
+  getClaudeStatus,
+  setClaudeApproval
+} = require('./providerPolicy');
 
 // ---------------------------------------------------------------------------
 // shared helpers

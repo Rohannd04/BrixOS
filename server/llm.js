@@ -89,6 +89,33 @@ function supportsTools(m) {
   return Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools');
 }
 
+// Pure "biggest context window" was the only ranking signal before this —
+// a cheap proxy for "more capable", but not for "fast and reliable for a
+// quick chat reply", which is what actually matters for the console and
+// for interpreting a change request. These are model families that have
+// been consistently fast and good at instruction-/tool-following on
+// OpenRouter's free tier; anything matching one is tried before the rest
+// of the pool, ranked by how early it matches. Anything not on this list
+// still gets used (ranked below all of these, by context length as
+// before) — this is a preference order, not an allow-list.
+const PREFERRED_MODEL_PATTERNS = [
+  /gemini-2\.0-flash/i,
+  /gemini-1\.5-flash/i,
+  /llama-3\.3-70b/i,
+  /llama-3\.1-(70|8)b/i,
+  /qwen-2\.5-(72|32)b/i,
+  /mistral-small/i,
+  /mixtral-8x7b/i,
+  /phi-3/i
+];
+
+function preferenceRank(modelId) {
+  for (let i = 0; i < PREFERRED_MODEL_PATTERNS.length; i++) {
+    if (PREFERRED_MODEL_PATTERNS[i].test(modelId)) return i;
+  }
+  return PREFERRED_MODEL_PATTERNS.length;
+}
+
 async function fetchOpenRouterModelList() {
   // See the matching comment in callOpenRouter: the abort has to stay
   // armed through the body read too, not just until fetch() resolves.
@@ -114,9 +141,15 @@ async function fetchSortedFreeModelPool() {
   if (!free.length) throw new Error('NO_FREE_MODEL_AVAILABLE');
   const freeWithTools = free.filter(supportsTools);
   const pool = freeWithTools.length ? freeWithTools : free;
-  // Bigger context window is a rough, cheap proxy for "more capable" when
-  // there's no other signal to rank free models by.
-  pool.sort((a, b) => (b.context_length || 0) - (a.context_length || 0));
+  // Known-fast/reliable model families first (see PREFERRED_MODEL_PATTERNS),
+  // then bigger context window as a cheap proxy for "more capable" among
+  // whatever's left — better than ranking purely by context length, which
+  // can just as easily surface something huge, slow, and flaky.
+  pool.sort((a, b) => {
+    const rankDiff = preferenceRank(a.id) - preferenceRank(b.id);
+    if (rankDiff !== 0) return rankDiff;
+    return (b.context_length || 0) - (a.context_length || 0);
+  });
   return pool.map((m) => m.id);
 }
 
@@ -335,6 +368,20 @@ async function callOpenRouterDirect(args) {
   return openRouterComplete(args);
 }
 
+// A model that produces neither a tool call nor any text is a dud
+// response, not a "the user said something confusing" response — free
+// OpenRouter models occasionally do this. Rather than show the user a
+// dead-end apology on the first empty reply, this is retried a couple of
+// times (blacklisting the model that produced the dud each time, same as
+// a hard error would) before giving up and returning the friendlier
+// last-resort text below.
+const EMPTY_REPLY_RETRIES = 2;
+
+// A last resort only — every effort above is made to avoid ever reaching
+// this (retrying empty replies across multiple candidate models first).
+// Kept in-character rather than a bare apology, per BrixOS's own voice.
+const LAST_RESORT_REPLY = "Let's try that again — tell me your business name or drop a link and I'll take a look right now.";
+
 // Multi-turn agentic loop (used by chat.js). Tool execution is delegated
 // back to the caller via onToolCall(name, input) => resultText, so this
 // file stays completely unaware of what save_profile_field/generate_site
@@ -344,12 +391,24 @@ async function callOpenRouterDirect(args) {
 // `system` may be a string or a () => string — pass a function when the
 // prompt needs to reflect state a tool call in an earlier turn just
 // changed (e.g. profile/score after saving a field).
-async function runToolLoop({ role, system, message, history, tools, maxTurns, onToolCall }) {
+//
+// `provider` optionally overrides the module's single auto-detected
+// PROVIDER — used by server/chat.js (via server/providerPolicy.js) to run
+// this same loop against Claude specifically, once an account has approved
+// paid usage, while everyone else still gets the free OpenRouter path.
+// Defaults to the module-level PROVIDER for every existing caller.
+async function runToolLoop({ role, system, message, history, tools, maxTurns, onToolCall, provider }) {
+  // server/providerPolicy.js names the Anthropic path 'claude' (matching how
+  // the Orchestrator labels/displays it); this module's own PROVIDER constant
+  // has always used 'anthropic'. Normalize here rather than making every
+  // caller know both spellings.
+  const normalizedProvider = provider === 'claude' ? 'anthropic' : provider;
+  const useProvider = normalizedProvider || PROVIDER;
   const historyMessages = (history || [])
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
     .map((m) => ({ role: m.role, content: m.content }));
 
-  if (PROVIDER === 'anthropic') {
+  if (useProvider === 'anthropic') {
     const anthropic = getAnthropic();
     if (!anthropic) throw new Error('NOT_CONFIGURED');
     const model = ANTHROPIC_MODELS[role] || ANTHROPIC_DEFAULT_MODEL;
@@ -366,7 +425,11 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
       const toolUses = resp.content.filter((b) => b.type === 'tool_use');
       if (!toolUses.length) {
         const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-        return { text: text || "Sorry, I didn't catch that — try again?", model };
+        if (text) return { text, model };
+        // Claude is reliable enough that this essentially never happens —
+        // but if it ever does, don't loop forever on a fixed model; just
+        // hand back the friendly last-resort text.
+        return { text: LAST_RESORT_REPLY, model };
       }
       messages.push({ role: 'assistant', content: resp.content });
       const toolResults = [];
@@ -379,22 +442,36 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
     return { text: "That took a few too many steps — try asking me one thing at a time?", model };
   }
 
-  if (PROVIDER === 'openrouter') {
+  if (useProvider === 'openrouter') {
     const messages = historyMessages.concat([{ role: 'user', content: message }]);
     let lastModel = null;
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      const { data, model } = await callOpenRouterWithRetry({
-        system: typeof system === 'function' ? system() : system,
-        messages,
-        tools,
-        maxTokens: 600
-      });
-      lastModel = model;
-      const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
-      const toolCalls = msg.tool_calls || [];
+      let data, model, toolCalls, msg;
+      let emptyAttempts = 0;
+
+      // Inner retry: a dud (no tool call, no text) reply doesn't consume a
+      // whole conversational turn — it just tries the next free-model
+      // candidate a couple more times before this turn gives up.
+      for (;;) {
+        ({ data, model } = await callOpenRouterWithRetry({
+          system: typeof system === 'function' ? system() : system,
+          messages,
+          tools,
+          maxTokens: 600
+        }));
+        lastModel = model;
+        msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+        toolCalls = msg.tool_calls || [];
+        const content = (msg.content || '').trim();
+        if (toolCalls.length || content) break;
+        emptyAttempts++;
+        if (emptyAttempts > EMPTY_REPLY_RETRIES) break;
+        markOpenRouterModelBad(model, 'empty reply (no text, no tool call)');
+      }
+
       if (!toolCalls.length) {
-        return { text: (msg.content || '').trim() || "Sorry, I didn't catch that — try again?", model };
+        return { text: (msg.content || '').trim() || LAST_RESORT_REPLY, model };
       }
       messages.push(msg);
       for (const tc of toolCalls) {

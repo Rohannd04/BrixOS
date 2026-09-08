@@ -16,6 +16,7 @@ const generate = require('./generate');
 const chat = require('./chat');
 const llm = require('./llm');
 const { auditWebsite, auditImprovements } = require('./audit');
+const { analyzeUploadedFile } = require('./fileAnalysis');
 const { buildOrchestratorRouter } = require('./orchestratorRoutes');
 
 const PORT = process.env.PORT || 3000;
@@ -93,7 +94,9 @@ function makeUploader(kind) {
   });
 
   const imageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif']);
-  const fileTypes = new Set([...imageTypes, 'application/pdf', 'text/plain', 'text/csv']);
+  // application/vnd...wordprocessingml.document is .docx — BrixOS reads
+  // these for real content (server/fileAnalysis.js), not just storing them.
+  const fileTypes = new Set([...imageTypes, 'application/pdf', 'text/plain', 'text/csv', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']);
 
   const allowed = kind === 'photos' ? imageTypes : fileTypes;
 
@@ -233,7 +236,7 @@ app.delete('/api/profile/:field', requireAuth, (req, res) => {
 
 function handleUpload(kind, uploader) {
   return (req, res) => {
-    uploader.array(kind, 8)(req, res, (err) => {
+    uploader.array(kind, 8)(req, res, async (err) => {
       if (err) return res.status(400).json({ error: err.message });
       if (!req.files || !req.files.length) return res.status(400).json({ error: 'No files received.' });
 
@@ -243,12 +246,33 @@ function handleUpload(kind, uploader) {
         id: crypto.randomUUID(),
         filename: f.originalname,
         url: `/uploads/${kind}/${path.basename(f.path)}`,
+        mimetype: f.mimetype,
         uploadedAt: new Date().toISOString()
       }));
       profile[kind] = [...profile[kind], ...added];
-      writeDB(db);
 
-      res.status(201).json(profilePayload(profile));
+      // "Files" (not photos) are the one upload kind BrixOS can actually go
+      // read, the same way saving a website triggers a real live audit
+      // instead of just a format check (server/fileAnalysis.js). Runs
+      // inline, synchronously, so a real score/improvements list comes back
+      // in this same response — no API key, no extra latency worth
+      // mentioning, same as the rest of BrixOS's dependency-free analysis.
+      let improvements;
+      if (kind === 'files') {
+        const insights = await Promise.all(
+          req.files.map((f, i) => analyzeUploadedFile(f.path, f.mimetype, f.originalname).then((insight) => Object.assign({ id: added[i].id }, insight)))
+        );
+        profile.fileInsights = [...(profile.fileInsights || []), ...insights];
+        const readable = insights.filter((i) => i.ok);
+        if (readable.length) {
+          const combined = [];
+          readable.forEach((i) => combined.push(...i.improvements));
+          improvements = [...new Set(combined)].slice(0, 4);
+        }
+      }
+
+      writeDB(db);
+      res.status(201).json(Object.assign(profilePayload(profile), improvements ? { improvements } : {}));
     });
   };
 }
@@ -267,6 +291,9 @@ function handleDeleteUpload(kind) {
     fs.unlink(diskPath, () => {}); // best-effort cleanup, don't fail the request on it
 
     profile[kind] = profile[kind].filter((f) => f.id !== req.params.id);
+    if (kind === 'files' && Array.isArray(profile.fileInsights)) {
+      profile.fileInsights = profile.fileInsights.filter((i) => i.id !== req.params.id);
+    }
     writeDB(db);
 
     res.json(profilePayload(profile));

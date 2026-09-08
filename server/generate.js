@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 const llm = require('./llm');
+const { fileInsightSummaryLine } = require('./fileAnalysis');
 
 // PLANNER_MODEL/BUILDER_MODEL are informational labels only (stored on
 // generatedSite for display) — the actual model used for a given call comes
@@ -122,6 +123,21 @@ function profileBrief(profile) {
     } else {
       lines.push('Note: BrixOS could not reach the existing website to audit it (' + audit.reason + ') — treat it as unverified.');
     }
+  }
+
+  // Real, extracted-text findings from any uploaded business documents (PDF/
+  // Word/text — server/fileAnalysis.js), so the rebuild can actually use
+  // what a business already wrote about itself (hours, pricing, its story)
+  // instead of guessing generically or repeating what the profile fields
+  // above already say.
+  const insights = (profile.fileInsights || []).filter((i) => i && i.ok);
+  if (insights.length) {
+    lines.push('Uploaded business document(s):');
+    insights.forEach((insight) => {
+      lines.push('- ' + fileInsightSummaryLine(insight));
+      if (insight.textExcerpt) lines.push('  Excerpt: ' + insight.textExcerpt.replace(/\s+/g, ' ').trim());
+    });
+    lines.push('Use any real details found above (hours, address, pricing, story, etc.) in the rebuild — don\'t invent facts that contradict them.');
   }
 
   return lines.join('\n');

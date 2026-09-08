@@ -29,7 +29,7 @@
     { id: 'social', kind: 'text', inputType: 'url', label: 'Social media link', placeholder: 'https://tiktok.com/@yourstore' },
     { id: 'map', kind: 'text', inputType: 'url', label: 'Map / location link', placeholder: 'https://maps.google.com/...' },
     { id: 'gmail', kind: 'text', inputType: 'email', label: 'Gmail', placeholder: 'you@gmail.com' },
-    { id: 'files', kind: 'file', accept: 'image/*,.pdf,.txt,.csv', multiple: true, label: 'Files' }
+    { id: 'files', kind: 'file', accept: 'image/*,.pdf,.txt,.csv,.docx', multiple: true, label: 'Files' }
   ];
   var FIELD_BY_ID = {};
   FIELDS.forEach(function (f) { FIELD_BY_ID[f.id] = f; });
@@ -158,6 +158,7 @@
   var heroSub = $('heroSub');
   var generateBtn = $('generateBtn');
   var exportZipBtn = $('exportZipBtn');
+  var openPreviewBtn = $('openPreviewBtn');
   var previewBody = $('previewBody');
   var previewMeta = $('previewMeta');
   var orchestratorStatus = $('orchestratorStatus');
@@ -442,6 +443,14 @@
         state.score = data.score;
         renderPopover(); renderChips(); renderScoreUI();
         toast(f.label + ' uploaded.');
+
+        // Uploaded documents get read for real (server/fileAnalysis.js) —
+        // same pattern as saving a website triggering a live audit: show
+        // what was found right in the console, not just a silent save.
+        if (Array.isArray(data.improvements) && data.improvements.length) {
+          var text = "I read what you uploaded — here's what I'd add: " + data.improvements.slice(0, 3).join(' ');
+          appendChatBubble('assistant', text);
+        }
       })
       .catch(function (err) { toast(err.message, true); });
   }
@@ -592,9 +601,36 @@
     exportZipBtn.hidden = !hasProject;
   }
 
+  // "Open in new tab" — the embedded preview is a sandboxed iframe (safe,
+  // but restrictive: internal links are intentionally inert there so
+  // clicking one can't navigate the app itself away, see renderPreview()
+  // below). This gives a real fallback / alternate way to actually see the
+  // generated page working: it opens the exact generated HTML as its own
+  // real, top-level page via a Blob URL — a real browser tab, not an
+  // embedded frame — the same way you'd open an HTML file directly.
+  var lastPreviewHtml = null;
+  function renderOpenPreviewButton() {
+    var site = state.profile && state.profile.generatedSite;
+    lastPreviewHtml = site ? site.html : null;
+    openPreviewBtn.hidden = !lastPreviewHtml;
+  }
+
+  openPreviewBtn.addEventListener('click', function () {
+    if (!lastPreviewHtml) return;
+    var blob = new Blob([lastPreviewHtml], { type: 'text/html' });
+    var url = URL.createObjectURL(blob);
+    var win = window.open(url, '_blank');
+    if (!win) {
+      toast('Your browser blocked the new tab — allow popups for this site and try again.', true);
+    }
+    // give the new tab time to actually load the blob before revoking it
+    setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+  });
+
   function renderPreview() {
     var site = state.profile && state.profile.generatedSite;
     renderExportButton();
+    renderOpenPreviewButton();
 
     if (!site) {
       previewBody.classList.remove('is-generated');
@@ -678,13 +714,31 @@
 
     consoleInput.value = '';
     appendChatBubble('user', value);
+    runChatTurn(value, chatHistory.slice(-12));
+  }
+
+  // Split out from sendChatMessage() so a chat message can be silently
+  // RE-sent after the user answers the Claude-approval prompt (see
+  // answerClaudeApproval below) without re-adding the user's bubble or
+  // re-reading the (already-cleared) input box.
+  function runChatTurn(value, historyForRequest) {
     showTyping();
     chatBusy = true;
     sendBtn.disabled = true;
 
-    api('/api/chat', { method: 'POST', body: { message: value, history: chatHistory.slice(-12) } })
+    api('/api/chat', { method: 'POST', body: { message: value, history: historyForRequest } })
       .then(function (data) {
         hideTyping();
+
+        // Chat hit BrixOS's paid-Claude-usage approval gate — same rule the
+        // Orchestrator enforces (server/providerPolicy.js). Pause here,
+        // ask, and — once answered — resend this exact message instead of
+        // guessing or silently spending anything.
+        if (data.needsClaudeApproval) {
+          openClaudeApprovalModalForChat(value, historyForRequest);
+          return;
+        }
+
         chatHistory.push({ role: 'user', content: value });
         chatHistory.push({ role: 'assistant', content: data.reply });
         typewriteBubble(appendChatBubble('assistant', ''), data.reply || '…');
@@ -692,7 +746,16 @@
         state.profile = data.profile;
         state.score = data.score;
         renderPopover(); renderChips(); renderScoreUI();
-        if (data.generated) toast('Your rebuilt site is ready — check the preview panel.');
+
+        // The chat agent started a real Orchestrator job (generate_site /
+        // modify_site) — light up the exact same progress UI and polling
+        // the "Generate my site" button uses, so it doesn't matter which
+        // entry point the user used.
+        if (data.orchestratorJobId) {
+          setOrchestratorBusy(true);
+          showOrchestratorStatus({ status: 'QUEUED' });
+          pollOrchestratorJob(data.orchestratorJobId);
+        }
       })
       .catch(function (err) {
         hideTyping();
@@ -753,9 +816,21 @@
     if (orchestratorPollTimer) { clearTimeout(orchestratorPollTimer); orchestratorPollTimer = null; }
   }
 
-  function openClaudeApprovalModal(jobId) {
+  // The Claude-approval modal is shared by two different callers: an
+  // Orchestrator job paused in AWAITING_APPROVAL (server/orchestrator.js),
+  // and a chat message that hit the same gate before it could even start
+  // reasoning (server/chat.js) — see pendingApproval below for which one is
+  // currently open.
+  var pendingApproval = null; // { type: 'job', jobId } | { type: 'chat', message, history }
+
+  function openClaudeApprovalModalForJob(jobId) {
+    pendingApproval = { type: 'job', jobId: jobId };
     claudeApprovalOverlay.classList.add('is-open');
-    claudeApprovalOverlay.dataset.jobId = jobId;
+  }
+
+  function openClaudeApprovalModalForChat(message, historyForRequest) {
+    pendingApproval = { type: 'chat', message: message, history: historyForRequest };
+    claudeApprovalOverlay.classList.add('is-open');
   }
 
   function closeClaudeApprovalModal() {
@@ -763,16 +838,28 @@
   }
 
   function answerClaudeApproval(approve) {
-    var jobId = claudeApprovalOverlay.dataset.jobId;
+    var pending = pendingApproval;
+    pendingApproval = null;
     closeClaudeApprovalModal();
-    if (!jobId) return;
-    api('/api/orchestrator/jobs/' + jobId + '/approve', { method: 'POST', body: { approve: approve } })
-      .then(function (job) { handleOrchestratorJob(job); })
-      .catch(function (err) {
-        setOrchestratorBusy(false);
-        hideOrchestratorStatus();
-        toast(err.message, true);
-      });
+    if (!pending) return;
+
+    if (pending.type === 'job') {
+      api('/api/orchestrator/jobs/' + pending.jobId + '/approve', { method: 'POST', body: { approve: approve } })
+        .then(function (job) { handleOrchestratorJob(job); })
+        .catch(function (err) {
+          setOrchestratorBusy(false);
+          hideOrchestratorStatus();
+          toast(err.message, true);
+        });
+      return;
+    }
+
+    // pending.type === 'chat' — persist the decision, then silently resend
+    // the exact same message: it'll run on Claude now, or (declined) fall
+    // through to the free OpenRouter path, either way without asking again.
+    api('/api/orchestrator/claude-approval', { method: 'POST', body: { approve: approve } })
+      .then(function () { runChatTurn(pending.message, pending.history); })
+      .catch(function (err) { appendChatBubble('assistant', err.message || 'Something went wrong — try again.'); });
   }
 
   claudeApproveBtn.addEventListener('click', function () { answerClaudeApproval(true); });
@@ -789,7 +876,7 @@
   function handleOrchestratorJob(job) {
     if (job.status === 'AWAITING_APPROVAL') {
       showOrchestratorStatus(job);
-      openClaudeApprovalModal(job.id);
+      openClaudeApprovalModalForJob(job.id);
       return;
     }
 

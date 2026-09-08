@@ -50,6 +50,13 @@ function emptyProfile() {
     gmail: '',
     photos: [],
     files: [],
+    // Real, extracted-text analysis of each uploaded "Files" document (PDF/
+    // Word/text) — see server/fileAnalysis.js. One entry per file in
+    // `files` above (matched by id): { id, ok, filename, wordCount,
+    // hasHours, hasContact, hasAddress, hasAbout, hasPricing,
+    // hasTestimonials, hasSocialMention, improvements, textExcerpt } or,
+    // for an unreadable/unsupported file, { id, ok: false, filename, reason }.
+    fileInsights: [],
     generatedSite: null, // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
     siteAudit: null, // real fetched-page analysis for `website` — set whenever it's saved/changed, see server/audit.js
 
