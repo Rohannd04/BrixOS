@@ -64,9 +64,62 @@ function scoreLabel(v) {
   return 'weak presence';
 }
 
+// When a real site audit (server/audit.js) is available, the website's
+// contribution to a dimension is computed from what was actually found on
+// the page instead of a flat "website is present" number — same point
+// ceiling as the old static CONTRIB table entry, so scores stay comparable,
+// but now it reflects the truth of that one page instead of just its
+// presence. Returns null (meaning: fall back to the static table value)
+// when there's no usable audit yet.
+function auditContribution(dim, audit) {
+  if (!audit || !audit.ok) return null;
+  switch (dim) {
+    case 'technical': {
+      let pts = 0;
+      if (audit.hasHttps) pts += 25;
+      if (audit.responseMs <= 2000) pts += 25;
+      else if (audit.responseMs <= 4000) pts += 12;
+      if (audit.hasViewport) pts += 20;
+      return Math.min(70, pts);
+    }
+    case 'seo': {
+      let pts = 0;
+      if (audit.hasTitle) pts += 10;
+      if (audit.hasDescription) pts += 10;
+      if (audit.hasH1) pts += 8;
+      if (audit.wordCount >= 150) pts += 7;
+      return Math.min(35, pts);
+    }
+    case 'ux': {
+      let pts = 0;
+      if (audit.hasViewport) pts += 20;
+      if (audit.hasH1) pts += 10;
+      if (audit.responseMs <= 3000) pts += 15;
+      return Math.min(45, pts);
+    }
+    case 'aeogeo': {
+      let pts = 0;
+      if (audit.hasStructuredData) pts += 10;
+      if (audit.ogTagCount > 0) pts += 5;
+      return Math.min(15, pts);
+    }
+    case 'content': {
+      // not in the static CONTRIB.content table at all today — this is
+      // pure upside once a real audit exists, so no flat number to replace.
+      if (audit.wordCount >= 300) return 20;
+      if (audit.wordCount >= 150) return 10;
+      if (audit.wordCount >= 50) return 4;
+      return 0;
+    }
+    default:
+      return null;
+  }
+}
+
 function computeScores(profile) {
   const present = presentAttachments(profile);
   const selectedCount = ATTACHMENTS.reduce((n, id) => n + (present[id] ? 1 : 0), 0);
+  const audit = profile && profile.siteAudit;
 
   const scores = {};
   scores.completeness = Math.round((selectedCount / ATTACHMENTS.length) * 100);
@@ -75,9 +128,21 @@ function computeScores(profile) {
     const table = CONTRIB[dim];
     let sum = 0;
     Object.keys(table).forEach((att) => {
-      if (present[att]) sum += table[att];
+      if (!present[att]) return;
+      if (att === 'website') {
+        const dynamic = auditContribution(dim, audit);
+        sum += dynamic !== null ? dynamic : table[att];
+      } else {
+        sum += table[att];
+      }
     });
-    scores[dim] = sum;
+    // 'content' has no static website entry — audit-derived content quality
+    // is pure upside, added only once a real audit exists.
+    if (dim === 'content' && present.website && !('website' in table)) {
+      const dynamic = auditContribution(dim, audit);
+      if (dynamic !== null) sum += dynamic;
+    }
+    scores[dim] = Math.min(100, sum);
   });
 
   let weighted = 0;

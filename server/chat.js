@@ -27,6 +27,7 @@ const { readDB, writeDB, getProfile } = require('./db');
 const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS } = require('./validate');
 const { isConfigured, planSite, buildSite, planSiteLocal, buildSiteLocal, PLANNER_MODEL, BUILDER_MODEL } = require('./generate');
+const { auditWebsite, auditImprovements, auditSummaryLine } = require('./audit');
 
 const API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const CHAT_MODEL = process.env.BRIXOS_CHAT_MODEL || process.env.BRIXOS_MODEL || 'claude-sonnet-4-5-20250929';
@@ -67,20 +68,29 @@ const GENERATE_TOOL = {
 function systemPrompt(profile, score) {
   const have = EDITABLE_FIELDS.filter((f) => profile[f]);
   const missing = EDITABLE_FIELDS.filter((f) => !profile[f]);
+  const audit = profile.siteAudit;
   return (
     "You are the BrixOS assistant — the conversational front door of a tool that scores a small retail " +
     "business's digital presence and can rebuild its homepage. Talk like a sharp, friendly consultant: short " +
     "replies, plain language, no corporate filler.\n\n" +
     'What you can actually do (use the tools — don\'t just say you will):\n' +
     '- If the user mentions their business name, a website/Instagram/Facebook/social/map link, or an email, ' +
-    'call save_profile_field to store it.\n' +
+    'call save_profile_field to store it. Saving a website triggers a real, live audit of that page — the tool ' +
+    'result will hand you the actual findings; report the specific ones, not generic advice.\n' +
     '- If the user asks you to build/generate/rebuild/redesign their site, call generate_site. It runs off ' +
     'whatever is already saved — if hardly anything is saved yet, still go ahead (it does its best), but you ' +
     'can also suggest they share more first.\n' +
     '- After a tool call, tell the user plainly what happened, in one or two sentences.\n\n' +
+    'IMPORTANT — never stall on "I need more information". Even a single detail (just a website, just an ' +
+    'Instagram link, whatever they gave you) is enough to give a real score and concrete next steps right now. ' +
+    'Score and analyze whatever has been shared and tell them specifically what to fix — then, separately, you ' +
+    'can mention that adding more (links, photos) would sharpen the picture further. Missing fields are ' +
+    'themselves worth naming as improvements ("add an Instagram link", "add your Google Maps listing"), not a ' +
+    'reason to withhold an answer.\n\n' +
     'Current profile — have: ' + (have.length ? have.join(', ') : 'nothing yet') +
     ' | still missing: ' + (missing.length ? missing.join(', ') : 'nothing') +
-    ' | presence score: ' + (score.selectedCount ? score.overall + '/100' : 'not yet scored') + '.\n' +
+    ' | presence score: ' + (score.selectedCount ? score.overall + '/100' : 'not yet scored') +
+    (audit ? '\nMost recent website audit — ' + auditSummaryLine(audit) : '') + '.\n' +
     'Keep replies short — a few sentences at most, this is a chat bubble, not an essay.'
   );
 }
@@ -130,10 +140,25 @@ async function sendMessage(message, history, userId) {
         const { field, value } = call.input || {};
         const check = EDITABLE_FIELDS.includes(field) ? validateField(field, value) : { ok: false, message: 'Unknown field.' };
         if (check.ok) {
+          const websiteChanged = field === 'website' && profile.website !== check.value;
           profile[field] = check.value;
           writeDB(db);
+
+          let resultText = `Saved ${field}.`;
+          if (websiteChanged) {
+            // Websites are the one field BrixOS can actually go verify —
+            // fetch and inspect it now, and hand the findings back as tool
+            // grounding so the model's own reply can cite real specifics
+            // instead of generic advice.
+            const audit = await auditWebsite(check.value);
+            profile.siteAudit = audit;
+            writeDB(db);
+            resultText += ` Live audit of that site — ${auditSummaryLine(audit)}. ` +
+              'Mention the specific issues found (not a generic list) and what to fix first.';
+          }
+
           score = computeScores(profile);
-          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Saved ${field}.` });
+          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: resultText });
         } else {
           toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Rejected: ${check.message}`, is_error: true });
         }
@@ -229,12 +254,17 @@ async function sendMessageLocal(message, history, userId) {
   let score = computeScores(profile);
   let generated = false;
   const savedFields = [];
+  let websiteAudit = null;
 
   const found = extractFieldsLocal(message);
   for (const field of Object.keys(found)) {
     if (!EDITABLE_FIELDS.includes(field)) continue;
     const check = validateField(field, found[field]);
     if (check.ok) {
+      if (field === 'website' && profile.website !== check.value) {
+        websiteAudit = await auditWebsite(check.value);
+        profile.siteAudit = websiteAudit;
+      }
       profile[field] = check.value;
       savedFields.push(field);
     }
@@ -267,17 +297,25 @@ async function sendMessageLocal(message, history, userId) {
     } catch (err) {
       reply = 'Something went wrong building that just now — try again in a moment.';
     }
+  } else if (savedFields.length && websiteAudit) {
+    // A website is the one thing BrixOS can actually go study, not just format-check
+    // — so this is the one reply that leads with a real score and concrete findings,
+    // instead of just acknowledging the save and asking for more.
+    const improvements = auditImprovements(websiteAudit);
+    reply = `Studied your site — presence score is ${score.overall}/100 right now. ` +
+      (improvements.length ? "Here's what I'd fix first: " + improvements.slice(0, 3).join(' ') : '') +
+      (missing.length ? ` Adding ${missing.slice(0, 2).join(' and ')} would round out the rest of your profile.` : '');
   } else if (savedFields.length) {
-    reply = `Got it — saved your ${savedFields.join(' and ')}.` +
+    reply = `Got it — saved your ${savedFields.join(' and ')}. Presence score is ${score.overall}/100 so far.` +
       (missing.length
-        ? ` Still missing: ${missing.slice(0, 3).join(', ')}. Share those, or say "build my site" whenever you're ready.`
+        ? ` Adding ${missing.slice(0, 3).join(', ')} would improve it further — or say "build my site" whenever you're ready.`
         : ' That\'s everything I need — say "build my site" and I\'ll generate it.');
   } else if (intent === 'greeting') {
-    reply = 'Hey! Tell me your business name, or drop a website / Instagram / Facebook / map link, and I\'ll start filling in your presence score. ' +
+    reply = 'Hey! Tell me your business name, or drop a website / Instagram / Facebook / map link, and I\'ll study it and score your presence right away. ' +
       'Once you\'ve shared a bit, just say "build my site" and I\'ll generate a homepage for you.';
   } else if (have.length) {
-    reply = `So far I have ${have.join(', ')}` +
-      (missing.length ? ` — still missing ${missing.slice(0, 3).join(', ')}.` : '.') +
+    reply = `Presence score is ${score.overall}/100 from what you've shared (${have.join(', ')}).` +
+      (missing.length ? ` Adding ${missing.slice(0, 3).join(', ')} would improve it further.` : '') +
       ' Share a link, or say "build my site" whenever you\'re ready.';
   } else {
     reply = 'I didn\'t catch a business detail there — try sharing your business name, a website, Instagram, Facebook, or map link, ' +

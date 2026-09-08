@@ -340,6 +340,15 @@
           renderChips();
           renderScoreUI();
           toast(FIELD_BY_ID[id].label + ' saved.');
+
+          // Saving a website triggers a real live audit server-side — show
+          // what it found right in the console, the same place chat replies
+          // land, so this doesn't only happen when you type instead of click.
+          if (Array.isArray(data.improvements) && data.improvements.length) {
+            var text = 'Studied your site — presence score is ' + data.score.overall + '/100. ' +
+              "Here's what I'd fix first: " + data.improvements.slice(0, 3).join(' ');
+            appendChatBubble('assistant', text);
+          }
         })
         .catch(function (err) { showFieldError(id, err.message); });
     } else {
@@ -526,10 +535,12 @@
 
     if (!s || s.selectedCount === 0) {
       scoreStatus.textContent = 'Add details to run a scan';
-    } else if (s.selectedCount < s.total) {
-      scoreStatus.textContent = s.selectedCount + '/' + s.total + ' details added — scanning…';
     } else {
-      scoreStatus.textContent = 'Scan complete — ' + s.label;
+      // A scan is "complete" the moment there's anything to study — even just
+      // one link — so BrixOS never leaves you staring at "needs more info"
+      // when you've already given it something real to analyze. The detail
+      // count is still shown, just as context, not as a gate.
+      scoreStatus.textContent = 'Scan complete — ' + s.label + ' (' + s.selectedCount + '/' + s.total + ' details found)';
     }
 
     scanBadge.textContent = 'SCANNING 214 SIGNALS ACROSS ' + (s ? s.total : 9) + ' CHANNELS';

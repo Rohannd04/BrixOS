@@ -111,6 +111,29 @@ function profileBrief(profile) {
   if (profile.gmail) lines.push('Contact email: ' + profile.gmail);
   lines.push('Photos uploaded: ' + (profile.photos ? profile.photos.length : 0));
   lines.push('Files uploaded: ' + (profile.files ? profile.files.length : 0));
+
+  // A real, live audit of the existing website (see server/audit.js) — if
+  // present, use this to fix specific, real gaps in the rebuild rather than
+  // guessing generically at what the old site might be missing.
+  const audit = profile.siteAudit;
+  if (audit) {
+    if (audit.ok) {
+      lines.push(
+        'Live audit of the existing website — HTTPS: ' + (audit.hasHttps ? 'yes' : 'no') +
+        ', title: ' + (audit.hasTitle ? audit.title : 'missing') +
+        ', meta description: ' + (audit.hasDescription ? 'present' : 'missing') +
+        ', mobile viewport: ' + (audit.hasViewport ? 'yes' : 'no') +
+        ', H1 headline: ' + (audit.hasH1 ? 'yes' : 'no') +
+        ', structured data: ' + (audit.hasStructuredData ? 'yes' : 'no') +
+        ', approx word count: ' + audit.wordCount +
+        ', response time: ' + (audit.responseMs / 1000).toFixed(1) + 's.' +
+        ' Fix whichever of these are weak in the rebuild — do not just repeat the same gaps.'
+      );
+    } else {
+      lines.push('Note: BrixOS could not reach the existing website to audit it (' + audit.reason + ') — treat it as unverified.');
+    }
+  }
+
   return lines.join('\n');
 }
 

@@ -14,6 +14,7 @@ const { computeScores } = require('./score');
 const { validateField, EDITABLE_FIELDS, validateEmail, validatePassword, validateName } = require('./validate');
 const generate = require('./generate');
 const chat = require('./chat');
+const { auditWebsite, auditImprovements } = require('./audit');
 
 const PORT = process.env.PORT || 3000;
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
@@ -174,7 +175,7 @@ app.get('/api/profile', requireAuth, (req, res) => {
   res.json(profilePayload(profile));
 });
 
-app.put('/api/profile/:field', requireAuth, (req, res) => {
+app.put('/api/profile/:field', requireAuth, async (req, res) => {
   const { field } = req.params;
   if (!EDITABLE_FIELDS.includes(field)) return res.status(400).json({ error: 'Unknown field.' });
 
@@ -183,10 +184,24 @@ app.put('/api/profile/:field', requireAuth, (req, res) => {
 
   const db = readDB();
   const profile = getProfile(db, req.session.userId);
+  const changed = field === 'website' && profile.website !== check.value;
   profile[field] = check.value;
   writeDB(db);
 
-  res.json(profilePayload(profile));
+  // A website link is the one field BrixOS can actually go verify, rather
+  // than just format-check — so saving/changing it runs a real fetch-and-
+  // inspect audit (server/audit.js) right here, synchronously, so the
+  // score and a concrete improvement list come back in this same response
+  // instead of leaving the user staring at "add more details".
+  let improvements;
+  if (changed) {
+    const audit = await auditWebsite(check.value);
+    profile.siteAudit = audit;
+    writeDB(db);
+    improvements = auditImprovements(audit);
+  }
+
+  res.json(Object.assign(profilePayload(profile), improvements ? { improvements } : {}));
 });
 
 app.delete('/api/profile/:field', requireAuth, (req, res) => {
@@ -196,6 +211,7 @@ app.delete('/api/profile/:field', requireAuth, (req, res) => {
   const db = readDB();
   const profile = getProfile(db, req.session.userId);
   profile[field] = '';
+  if (field === 'website') profile.siteAudit = null;
   writeDB(db);
 
   res.json(profilePayload(profile));

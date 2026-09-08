@@ -50,7 +50,8 @@ function emptyProfile() {
     gmail: '',
     photos: [],
     files: [],
-    generatedSite: null // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
+    generatedSite: null, // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
+    siteAudit: null // real fetched-page analysis for `website` — set whenever it's saved/changed, see server/audit.js
   };
 }
 
