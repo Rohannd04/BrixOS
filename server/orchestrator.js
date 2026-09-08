@@ -42,9 +42,18 @@ const { EDITABLE_FIELDS } = require('./validate');
 const { auditWebsite, auditImprovements } = require('./audit');
 const { validatePage, validateProject } = require('./orchestratorValidate');
 const { planSiteLocal, profileBrief } = require('./generate');
+const {
+  PALETTES,
+  pickPalette,
+  collectPhotoDataUris,
+  renderSitePage
+} = require('./siteTemplate');
 
+// Kept only for backward compatibility with anything reading this export —
+// the GENERATE stage no longer retries a model call, so it no longer
+// applies, but MAX_GENERATION_ITERATIONS/ORCHESTRATOR_CONCURRENCY env vars
+// are otherwise undocumented breaking changes for zero benefit.
 const MAX_GENERATION_ITERATIONS = Math.max(0, Number(process.env.MAX_GENERATION_ITERATIONS) || 3);
-const GENERATION_CONCURRENCY = Math.max(1, Number(process.env.ORCHESTRATOR_CONCURRENCY) || 3);
 const JOB_TTL_MS = 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
@@ -129,36 +138,10 @@ function jobSummary(job) {
 // enforces exactly one policy instead of two that could drift apart.
 const {
   pickReasoningProvider,
-  pickGenerationProvider,
   needsClaudeDecision,
   getClaudeStatus,
   setClaudeApproval
 } = require('./providerPolicy');
-
-// ---------------------------------------------------------------------------
-// shared helpers
-// ---------------------------------------------------------------------------
-
-function stripFences(text) {
-  return String(text || '').replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/i, '').trim();
-}
-
-function escapeHtml(str) {
-  return String(str || '').replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
-}
-
-async function runWithConcurrency(items, limit, worker) {
-  const queue = items.slice();
-  const runners = new Array(Math.min(limit, items.length || 1)).fill(0).map(async () => {
-    while (queue.length) {
-      const item = queue.shift();
-      await worker(item);
-    }
-  });
-  await Promise.all(runners);
-}
 
 const ORCHESTRATOR_PLAN_TOOL = {
   name: 'submit_orchestrator_plan',
@@ -327,9 +310,18 @@ async function stagePlan(job, profile, score, study, reasoning) {
         system:
           'You are the BrixOS Orchestrator\'s Planning Engine. Given a small retail business\'s profile, decide the ' +
           'full multi-page architecture for its rebuilt website: which pages it needs (2-5), what each page says, ' +
-          'the design system, and SEO/AEO/GEO strategy. You never write code — only structure, copy direction, and ' +
-          'metadata. Be concrete and specific to this business; avoid generic filler. If a fact isn\'t given, list it ' +
-          'under missing_information instead of inventing it. Always call submit_orchestrator_plan exactly once.',
+          'the design system, and SEO/AEO/GEO strategy. You never write code or design the visuals — a hand-crafted ' +
+          'BrixOS template turns your plan into the actual page, so focus entirely on content and structure being ' +
+          'specific, real, and worth reading. Be concrete and specific to this business; avoid generic filler a plan ' +
+          'for any random shop could also use — use real specifics from what you were given (services, location, ' +
+          'materials, hours, pricing) wherever possible instead of vague phrases like "quality and service". Never ' +
+          'invent fake customer reviews, fake testimonials, fake awards, or fake press mentions — for a "testimonial" ' +
+          'section, only use a real quote if one was actually provided (e.g. from an uploaded document); otherwise ' +
+          'use a genuine trust angle instead (years in business, a guarantee, a real number) or skip that section ' +
+          'type entirely. If a fact isn\'t given, list it under missing_information instead of inventing it. The ' +
+          'seo_strategy.keywords array should be 3-5 short, real phrases about this specific business (e.g. ' +
+          '"handmade pottery", "Austin TX", "walk-ins welcome") — they double as a highlight strip on the homepage, ' +
+          'so keep each one under 25 characters and concrete. Always call submit_orchestrator_plan exactly once.',
         userText: 'Here is everything currently known about this business:\n\n' + study.brief + '\n\nPlan its rebuilt website now.',
         tools: [ORCHESTRATOR_PLAN_TOOL],
         forceToolName: 'submit_orchestrator_plan',
@@ -359,181 +351,44 @@ function stageArchitect(job, plan) {
 // stage: GENERATING (+ VALIDATING / FIXING per page)
 // ---------------------------------------------------------------------------
 
-function contactLinksHtml(profile) {
-  const links = [];
-  if (profile.website) links.push(`<a href="${escapeHtml(profile.website)}" target="_blank" rel="noopener">Website</a>`);
-  if (profile.instagram) links.push(`<a href="${escapeHtml(profile.instagram)}" target="_blank" rel="noopener">Instagram</a>`);
-  if (profile.facebook) links.push(`<a href="${escapeHtml(profile.facebook)}" target="_blank" rel="noopener">Facebook</a>`);
-  if (profile.map) links.push(`<a href="${escapeHtml(profile.map)}" target="_blank" rel="noopener">Map</a>`);
-  if (profile.gmail) links.push(`<a href="mailto:${escapeHtml(profile.gmail)}">Email</a>`);
-  return links;
+// Every page's actual HTML/CSS now comes from server/siteTemplate.js's
+// hand-crafted, curated template — never from asking a model to author raw
+// markup. `generation` (the OpenRouter/Claude provider picked for this job)
+// is intentionally unused for per-page HTML anymore; the plan's own copy
+// (already written by the reasoning stage when available, or by the local
+// deterministic planner otherwise) is all the content a page needs. This
+// removes what used to be the single biggest source of inconsistent output
+// AND unreliability: free models are fine at deciding what a business
+// should say (the PLANNING stage still uses one), but inconsistent at
+// hand-authoring a whole page's design from scratch — and a dud response
+// there used to silently fall back to a much plainer page. A deterministic
+// template can't return a dud response, and it always passes validatePage()
+// by construction (real doctype/title/viewport, every planned headline
+// literally present), so there's no FIX-loop left to run here.
+function buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug) {
+  return renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, photos });
 }
 
-// Inline guard script embedded in every generated page. BrixOS's own
-// preview renders a page inside a sandboxed `srcdoc` iframe (no
-// allow-same-origin) so the user can see it without ever leaving the app.
-// Relative links like "contact.html" inside a srcdoc document resolve
-// against the OUTER embedding page's real URL though, and clicking one
-// makes the iframe navigate itself to that (nonexistent, server-side) route
-// — producing a raw "Cannot GET /contact.html" instead of staying inside
-// the preview. This script only disarms internal .html links while the
-// page is actually embedded (window.self !== window.top); once the site is
-// exported as a ZIP and the files are opened directly in a browser,
-// window.self === window.top and every link works exactly as a normal,
-// real website's would.
-const PREVIEW_SAFE_NAV_SCRIPT = `<script>
-(function(){
-  if (window.self === window.top) return;
-  document.addEventListener('click', function(e){
-    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (!a) return;
-    var href = a.getAttribute('href') || '';
-    if (/^[a-zA-Z0-9_-]+\\.html(#.*)?$/.test(href)) { e.preventDefault(); }
-  }, true);
-})();
-</` + `script>`;
-
-// Dependency-free, no-API-key page template — used whenever neither
-// OpenRouter nor an approved Claude is available. Deliberately plain but
-// real: every planned section actually renders, the nav links to every
-// other real page, and it passes the same validatePage() checks a model's
-// output would have to.
-function renderLocalPage(task, plan, profile, allTasks) {
-  const accent = (plan.design_system && plan.design_system.accentColor) || '#B5622E';
-  const navHtml = allTasks.map((t) => `<a href="${t.slug}.html">${escapeHtml(t.navLabel)}</a>`).join('');
-  const sectionsHtml = (task.sections || []).map((s, i) => `
-    <section>
-      <${i === 0 ? 'h1' : 'h2'}>${escapeHtml(s.headline)}</${i === 0 ? 'h1' : 'h2'}>
-      <p>${escapeHtml(s.body)}</p>
-      ${s.cta ? `<a class="btn" href="contact.html">${escapeHtml(s.cta)}</a>` : ''}
-    </section>`).join('');
-  const links = contactLinksHtml(profile);
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${escapeHtml(task.title)}</title>
-<meta name="description" content="${escapeHtml((plan.seo_strategy && plan.seo_strategy.description) || task.title)}">
-<style>
-  :root { --accent: ${accent}; --bg: #F7F1E6; --panel: #fff; --text: #1E1912; --text-muted: #67594A; --border: rgba(33,27,20,.1); }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  header { padding: 20px 6vw; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
-  .brand { font-weight: 700; font-size: 20px; }
-  nav a { color: var(--text); text-decoration: none; margin-right: 18px; font-size: 14px; }
-  section { padding: 40px 6vw; max-width: 880px; margin: 0 auto; }
-  h1 { font-size: clamp(28px, 5vw, 44px); }
-  h2 { font-size: 26px; }
-  p { color: var(--text-muted); line-height: 1.6; }
-  .btn { display: inline-block; background: var(--text); color: var(--bg); padding: 12px 24px; border-radius: 999px; text-decoration: none; font-weight: 600; margin-top: 10px; }
-  footer { padding: 28px 6vw; border-top: 1px solid var(--border); text-align: center; color: var(--text-muted); font-size: 14px; }
-</style>
-</head>
-<body>
-  <header>
-    <div class="brand">${escapeHtml(plan.pages && plan.pages[0] ? plan.pages[0].title : 'Your Business')}</div>
-    <nav>${navHtml}</nav>
-  </header>
-  ${sectionsHtml}
-  <footer>${links.length ? links.join(' &middot; ') + ' &middot; ' : ''}Built with BrixOS</footer>
-  ${PREVIEW_SAFE_NAV_SCRIPT}
-</body>
-</html>`;
-}
-
-const ORCHESTRATOR_BUILDER_SYSTEM =
-  'You are the BrixOS Orchestrator\'s Generation Worker. You receive one page of a structured, multi-page site ' +
-  'plan and turn it into a single, complete, self-contained HTML file — production-quality, mobile-first, and ' +
-  'accessible.\nRules:\n' +
-  '- Output ONLY the raw HTML file, starting with <!doctype html> and nothing before or after it — no markdown ' +
-  'code fences, no commentary.\n' +
-  '- Inline all CSS in a <style> tag and all JS in a <script> tag — no external stylesheets or scripts except ' +
-  'Google Fonts.\n' +
-  '- Include a <nav> that links every other page in this project using the exact relative hrefs given to you ' +
-  '(e.g. "about.html", "index.html").\n' +
-  '- Do not invent fake customer reviews, fake awards, or fake press mentions, and do not invent business facts ' +
-  'that were listed as missing — use only what is given.\n' +
-  '- Include semantic HTML (a real <h1> for the first section), a viewport meta tag, and on-page SEO (title, meta ' +
-  'description) from the given SEO fields.\n' +
-  '- Do not add any click handlers that call preventDefault() on internal navigation links — BrixOS handles ' +
-  'preview-safe navigation itself by injecting its own script into the file after you return it.';
-
-// Deterministically ensures every generated page — model output or local
-// template — carries the preview-safe-navigation guard, regardless of
-// whether the model followed the system prompt. Inserted just before
-// </body> (case-insensitive); appended at the end as a fallback if a
-// generated file is missing a closing </body> tag.
-function injectPreviewSafeNavScript(html) {
-  if (!html) return html;
-  if (html.includes(PREVIEW_SAFE_NAV_SCRIPT)) return html;
-  const closeBodyMatch = html.match(/<\/body\s*>/i);
-  if (closeBodyMatch) {
-    const idx = html.lastIndexOf(closeBodyMatch[0]);
-    return html.slice(0, idx) + PREVIEW_SAFE_NAV_SCRIPT + '\n' + html.slice(idx);
-  }
-  return html + PREVIEW_SAFE_NAV_SCRIPT;
-}
-
-async function generatePageHtml(task, plan, allTasks, profile, generation, fixNotes) {
-  if (generation) {
-    const navList = allTasks.map((t) => `${t.navLabel} -> ${t.slug}.html`).join(', ');
-    const userText = [
-      'Full project plan (JSON), for context on the whole site:',
-      JSON.stringify(plan, null, 2),
-      '',
-      `Now write the complete HTML file for the "${task.title}" page (slug: "${task.slug}").`,
-      'Site navigation — link every one of these on this page, using these exact hrefs: ' + navList,
-      'Contact/link details to weave in where relevant:\n' + profileBrief(profile),
-      fixNotes ? '\nThe previous attempt at this page had these problems — fix them specifically:\n' + fixNotes : ''
-    ].filter(Boolean).join('\n\n');
-
-    const { text, model } = await generation.call({
-      role: 'builder',
-      system: ORCHESTRATOR_BUILDER_SYSTEM,
-      userText,
-      maxTokens: 6000
-    });
-    const html = stripFences(text);
-    if (html) return { html: injectPreviewSafeNavScript(html), model, source: generation.provider };
-    // fall through to local template if the model returned nothing usable
-  }
-  return { html: renderLocalPage(task, plan, profile, allTasks), model: 'local-template', source: 'local' };
-}
-
-async function stageGenerateValidateFix(job, tasks, plan, profile, generation) {
+function stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug) {
   logStage(job, 'GENERATING', 'Generating your pages…');
   const pages = {};
   const models = {};
 
-  await runWithConcurrency(tasks, GENERATION_CONCURRENCY, async (task) => {
-    let html, model, source;
-    let fixNotes = null;
-
-    for (let attempt = 0; attempt <= MAX_GENERATION_ITERATIONS; attempt++) {
-      const gen = await generatePageHtml(task, plan, tasks, profile, generation, fixNotes);
-      html = gen.html; model = gen.model; source = gen.source;
-
-      const result = validatePage(html, task);
-      if (result.ok) break;
-
-      if (attempt === MAX_GENERATION_ITERATIONS) {
-        job.log.push({
-          stage: 'VALIDATING',
-          message: `"${task.title}" still has issues after ${attempt + 1} attempt(s), showing the best version: ${result.errors.join(' ')}`,
-          at: new Date().toISOString()
-        });
-        break;
-      }
-
-      job.iteration = Math.max(job.iteration, attempt + 1);
-      logStage(job, 'FIXING', `Fixing issues on "${task.title}" (attempt ${attempt + 2} of ${MAX_GENERATION_ITERATIONS + 1})…`);
-      fixNotes = result.errors.join('\n');
+  tasks.forEach((task) => {
+    const html = buildPageHtml(task, plan, profile, tasks, palette, photos, homeSlug);
+    const result = validatePage(html, task);
+    if (!result.ok) {
+      // Should be unreachable with a deterministic template — kept as a
+      // visible signal rather than a silent swallow, in case a future
+      // template change ever breaks validatePage()'s structural checks.
+      job.log.push({
+        stage: 'VALIDATING',
+        message: `"${task.title}" has unexpected structural issues: ${result.errors.join(' ')}`,
+        at: new Date().toISOString()
+      });
     }
-
     pages[task.slug] = html;
-    models[task.slug] = { model, source };
+    models[task.slug] = { model: `template:${palette.id}`, source: 'brixos-template' };
   });
 
   logStage(job, 'VALIDATING', 'Checking links between pages…');
@@ -603,21 +458,29 @@ async function runJob(job) {
     }
 
     const reasoning = pickReasoningProvider(profile);
-    const generation = pickGenerationProvider(profile);
     job.reasoningProvider = reasoning ? reasoning.provider : 'local';
-    job.generationProvider = generation ? generation.provider : 'local';
+    job.generationProvider = 'brixos-template';
 
     const score = computeScores(profile);
     const study = await stageStudy(job, profile, score);
 
     const { plan, model: plannerModel } = await stagePlan(job, profile, score, study, reasoning);
     job.plannerModel = plannerModel;
+
+    // Design system pick — deterministic, based on business category/tone,
+    // never the model's own design taste (see server/siteTemplate.js).
+    // Persisted onto the plan so a later modification job reuses the exact
+    // same palette instead of re-deriving it (and potentially drifting if
+    // the business_understanding wording changes on a re-plan).
+    const palette = pickPalette(profile, plan);
+    plan.design_system.paletteId = palette.id;
+    const photos = collectPhotoDataUris(profile);
     job.plan = plan;
 
     const tasks = stageArchitect(job, plan);
-    const { pages, models, projectWarnings } = await stageGenerateValidateFix(job, tasks, plan, profile, generation);
-    const builtModels = Object.values(models);
-    job.builderModel = builtModels.length ? builtModels[0].model : 'local-template';
+    const homeSlug = plan.pages.some((p) => p.slug === 'index') ? 'index' : plan.pages[0].slug;
+    const { pages, models, projectWarnings } = stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug);
+    job.builderModel = `template:${palette.id}`;
 
     stagePreview(job, profile, db, plan, pages, models);
     job.pages = pages;
@@ -664,9 +527,8 @@ async function runModifyJob(job, instruction) {
     }
 
     const reasoning = pickReasoningProvider(profile);
-    const generation = pickGenerationProvider(profile);
     job.reasoningProvider = reasoning ? reasoning.provider : 'local';
-    job.generationProvider = generation ? generation.provider : 'local';
+    job.generationProvider = 'brixos-template';
 
     logStage(job, 'PLANNING', 'Understanding the requested change…');
     const plan = project.plan;
@@ -711,19 +573,21 @@ async function runModifyJob(job, instruction) {
     plan.pages[targetPageIndex] = Object.assign({}, plan.pages[targetPageIndex], { sections: updatedSections });
 
     const task = { slug: targetSlug, title: plan.pages[targetPageIndex].title, navLabel: plan.pages[targetPageIndex].nav_label, sections: updatedSections };
-    const allTasks = plan.pages.map((p) => ({ slug: p.slug, navLabel: p.nav_label }));
+    const allTasks = plan.pages.map((p) => ({ slug: p.slug, navLabel: p.nav_label, title: p.title }));
+    const homeSlug = plan.pages.some((p) => p.slug === 'index') ? 'index' : plan.pages[0].slug;
+
+    // Reuse the exact palette this project was originally generated with
+    // (persisted on plan.design_system.paletteId — see runJob) rather than
+    // re-deriving it, so a copy tweak never accidentally reshuffles the
+    // whole site's visual identity.
+    const palette = PALETTES[plan.design_system && plan.design_system.paletteId] || pickPalette(profile, plan);
+    const photos = collectPhotoDataUris(profile);
 
     logStage(job, 'GENERATING', `Updating "${task.title}"…`);
-    let html;
-    let fixNotes = null;
-    for (let attempt = 0; attempt <= MAX_GENERATION_ITERATIONS; attempt++) {
-      const gen = await generatePageHtml(task, plan, allTasks, profile, generation, fixNotes);
-      html = gen.html;
-      const result = validatePage(html, task);
-      if (result.ok || attempt === MAX_GENERATION_ITERATIONS) break;
-      job.iteration = Math.max(job.iteration, attempt + 1);
-      logStage(job, 'FIXING', `Fixing "${task.title}" (attempt ${attempt + 2} of ${MAX_GENERATION_ITERATIONS + 1})…`);
-      fixNotes = result.errors.join('\n');
+    const html = buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug);
+    const result = validatePage(html, task);
+    if (!result.ok) {
+      job.log.push({ stage: 'VALIDATING', message: `"${task.title}" has unexpected structural issues: ${result.errors.join(' ')}`, at: new Date().toISOString() });
     }
 
     project.pages[targetSlug] = html;
@@ -731,7 +595,6 @@ async function runModifyJob(job, instruction) {
     project.generatedAt = new Date().toISOString();
     profile.generatedProject = project;
 
-    const homeSlug = plan.pages.some((p) => p.slug === 'index') ? 'index' : plan.pages[0].slug;
     if (targetSlug === homeSlug && profile.generatedSite) {
       profile.generatedSite = Object.assign({}, profile.generatedSite, {
         html,

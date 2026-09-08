@@ -319,9 +319,31 @@ async function anthropicComplete({ role, system, userText, tools, forceToolName,
 
 async function openRouterComplete({ system, userText, tools, forceToolName, maxTokens }) {
   if (!OPENROUTER_KEY) throw new Error('NOT_CONFIGURED');
-  const { data, model } = await callOpenRouterWithRetry({ system, messages: [{ role: 'user', content: userText }], tools, forceToolName, maxTokens });
-  const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
-  const toolCall = (msg.tool_calls || [])[0];
+  const messages = [{ role: 'user', content: userText }];
+
+  // Same dud-reply problem runToolLoop() guards against (see
+  // EMPTY_REPLY_RETRIES above): a free model can return 200 OK with no tool
+  // call AND no text. Single-turn callers (server/orchestrator.js's direct
+  // planning/generation calls, via callOpenRouterDirect) used to have no
+  // guard for this at all — a dud plan/page response silently fell through
+  // to the caller's local-template fallback instead of trying another
+  // model, which is why the Orchestrator's real AI pipeline could quietly
+  // degrade to the plain local site even with OpenRouter fully configured
+  // and working (proven working elsewhere, e.g. plain chat replies).
+  let data, model, msg, toolCall;
+  let emptyAttempts = 0;
+  for (;;) {
+    ({ data, model } = await callOpenRouterWithRetry({ system, messages, tools, forceToolName, maxTokens }));
+    msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+    toolCall = (msg.tool_calls || [])[0];
+    const content = (msg.content || '').trim();
+    const hasUsableOutput = forceToolName ? Boolean(toolCall) : Boolean(toolCall || content);
+    if (hasUsableOutput) break;
+    emptyAttempts++;
+    if (emptyAttempts > EMPTY_REPLY_RETRIES) break;
+    markOpenRouterModelBad(model, 'empty reply (no text, no tool call)');
+  }
+
   return { text: (msg.content || '').trim(), toolInput: toolCall ? safeParseJson(toolCall.function.arguments) : null, model };
 }
 
