@@ -168,7 +168,10 @@
     <div class="card">
       <div class="card-head">
         <h2 class="display">Generated preview</h2>
-        <button class="generate-btn mono" id="generateBtn" type="button">Generate my site</button>
+        <div class="card-head-actions">
+          <button class="generate-btn mono ghost" id="exportZipBtn" type="button" hidden>Download ZIP</button>
+          <button class="generate-btn mono" id="generateBtn" type="button">Generate my site</button>
+        </div>
       </div>
       <div class="browser">
         <div class="browser-bar">
@@ -184,6 +187,7 @@
           </div>
         </div>
       </div>
+      <p class="preview-meta mono" id="orchestratorStatus" hidden></p>
       <p class="preview-meta mono" id="previewMeta" hidden></p>
     </div>
   </div>
@@ -328,6 +332,18 @@
     </form>
 
     <p class="modal-foot" id="authSwitch">New to BrixOS? <a href="#" id="authSwitchLink">Create an account</a></p>
+  </div>
+</div>
+
+<div class="modal-overlay" id="claudeApprovalOverlay">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="claudeApprovalTitle">
+    <div class="modal-mark"></div>
+    <h2 id="claudeApprovalTitle" class="display">Use Claude for this?</h2>
+    <p class="modal-sub">Claude API usage may incur charges for this operation. Do you want to continue with Claude API, or have BrixOS use its free model pipeline instead?</p>
+    <div class="claude-approval-actions">
+      <button class="submit-btn" type="button" id="claudeApproveBtn">Continue with Claude</button>
+      <button class="generate-btn mono ghost" type="button" id="claudeDeclineBtn">Use free model instead</button>
+    </div>
   </div>
 </div>
 

@@ -51,7 +51,26 @@ function emptyProfile() {
     photos: [],
     files: [],
     generatedSite: null, // { plan, html, generatedAt, plannerModel, builderModel } — set by POST /api/generate
-    siteAudit: null // real fetched-page analysis for `website` — set whenever it's saved/changed, see server/audit.js
+    siteAudit: null, // real fetched-page analysis for `website` — set whenever it's saved/changed, see server/audit.js
+
+    // BrixOS Orchestrator (server/orchestrator.js) state — separate from the
+    // simpler one-shot generatedSite above:
+    //   generatedProject  — the full multi-page site the Orchestrator last
+    //                        produced: { plan, pages: {slug: html}, generatedAt,
+    //                        reasoningProvider, generationProvider }. This is
+    //                        what "Download ZIP" packages up.
+    //   claudeApprovalGranted — a tri-state: null = not yet decided (BrixOS
+    //                        will ask before its first paid Claude call),
+    //                        true = this user has explicitly approved BrixOS
+    //                        spending paid Claude API credits on their
+    //                        behalf, false = they explicitly declined (so
+    //                        BrixOS won't ask again until they change it —
+    //                        see the approval gate in server/orchestrator.js).
+    //                        Even with ANTHROPIC_API_KEY configured
+    //                        server-side, Claude is never called for this
+    //                        user until this is true.
+    generatedProject: null,
+    claudeApprovalGranted: null
   };
 }
 
@@ -59,7 +78,16 @@ function getProfile(db, userId) {
   if (!db.profiles[userId]) {
     db.profiles[userId] = emptyProfile();
   }
-  return db.profiles[userId];
+  // Backfill any fields added to the profile shape after this profile was
+  // first created (e.g. generatedProject/claudeApprovalGranted, added for
+  // the BrixOS Orchestrator) — existing accounts' db.json entries predate
+  // them and would otherwise be missing the keys entirely.
+  const profile = db.profiles[userId];
+  const defaults = emptyProfile();
+  Object.keys(defaults).forEach((key) => {
+    if (!(key in profile)) profile[key] = defaults[key];
+  });
+  return profile;
 }
 
 module.exports = { readDB, writeDB, emptyProfile, getProfile, DB_PATH };

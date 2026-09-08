@@ -565,6 +565,14 @@ h1 {
 .generate-btn:hover:not(:disabled) { border-color: var(--violet); background: rgba(181,98,46,0.16); }
 .generate-btn:disabled { opacity: 0.55; cursor: default; }
 
+.card-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.generate-btn.ghost { background: transparent; border-color: var(--border); color: var(--text-muted); }
+.generate-btn.ghost:hover:not(:disabled) { border-color: var(--violet); color: var(--text); background: rgba(181,98,46,0.08); }
+.generate-btn.ghost[hidden] { display: none; }
+
+.claude-approval-actions { display: flex; flex-direction: column; gap: 10px; }
+.claude-approval-actions .submit-btn { box-shadow: none; }
+
 .score-head { align-items: center; gap: 18px; margin-bottom: 24px; }
 .score-gauge { position: relative; width: 78px; height: 78px; flex: none; }
 .score-gauge svg { width: 100%; height: 100%; }

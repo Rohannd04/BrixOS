@@ -157,8 +157,13 @@
   var previewUrl = $('previewUrl');
   var heroSub = $('heroSub');
   var generateBtn = $('generateBtn');
+  var exportZipBtn = $('exportZipBtn');
   var previewBody = $('previewBody');
   var previewMeta = $('previewMeta');
+  var orchestratorStatus = $('orchestratorStatus');
+  var claudeApprovalOverlay = $('claudeApprovalOverlay');
+  var claudeApproveBtn = $('claudeApproveBtn');
+  var claudeDeclineBtn = $('claudeDeclineBtn');
   var chatLog = $('chatLog');
   var engineMode = $('engineMode');
   var previewBodyDefaultHTML = previewBody.innerHTML; // the static mock, shown until a real site is generated
@@ -577,8 +582,19 @@
     return Math.round(hrs / 24) + 'd ago';
   }
 
+  // "Download ZIP" only makes sense once the BrixOS Orchestrator has
+  // produced a real multi-page project (server/orchestrator.js) — the
+  // older single-file /api/generate path never sets generatedProject, so
+  // the button simply stays hidden for a site built that way, which is
+  // correct (there is nothing multi-file to export yet).
+  function renderExportButton() {
+    var hasProject = Boolean(state.profile && state.profile.generatedProject);
+    exportZipBtn.hidden = !hasProject;
+  }
+
   function renderPreview() {
     var site = state.profile && state.profile.generatedSite;
+    renderExportButton();
 
     if (!site) {
       previewBody.classList.remove('is-generated');
@@ -694,8 +710,123 @@
   });
 
   // ===========================================================================
-  // "Generate my site" — calls the Planner -> Builder pipeline on the server
+  // "Generate my site" — the BrixOS Orchestrator (server/orchestrator.js):
+  // UNDERSTAND -> RESEARCH -> PLAN -> ARCHITECT -> GENERATE -> VALIDATE ->
+  // FIX -> PREVIEW, run as a background job and polled here for live status.
+  // Falls back to the older one-shot /api/generate only if starting a job
+  // fails outright (e.g. offline), so "Generate my site" still does
+  // *something* rather than a dead end.
   // ===========================================================================
+
+  var orchestratorPollTimer = null;
+  var orchestratorBusy = false;
+
+  var ORCHESTRATOR_STAGE_LABELS = {
+    QUEUED: 'Queued…',
+    STUDYING: 'Studying your business…',
+    PLANNING: 'Creating your website architecture…',
+    ARCHITECTING: 'Breaking the site into pages…',
+    GENERATING: 'Generating your pages…',
+    VALIDATING: 'Checking your site for issues…',
+    FIXING: 'Fixing issues it found…',
+    READY: 'Your site is ready.',
+    FAILED: 'Generation failed.'
+  };
+
+  function setOrchestratorBusy(busy) {
+    orchestratorBusy = busy;
+    generateBtn.disabled = busy;
+    generateBtn.textContent = busy ? 'Generating…' : 'Generate my site';
+    previewBody.classList.toggle('is-loading', busy);
+  }
+
+  function showOrchestratorStatus(job) {
+    orchestratorStatus.hidden = false;
+    orchestratorStatus.textContent = job.message || ORCHESTRATOR_STAGE_LABELS[job.status] || job.status;
+  }
+
+  function hideOrchestratorStatus() {
+    orchestratorStatus.hidden = true;
+  }
+
+  function stopOrchestratorPolling() {
+    if (orchestratorPollTimer) { clearTimeout(orchestratorPollTimer); orchestratorPollTimer = null; }
+  }
+
+  function openClaudeApprovalModal(jobId) {
+    claudeApprovalOverlay.classList.add('is-open');
+    claudeApprovalOverlay.dataset.jobId = jobId;
+  }
+
+  function closeClaudeApprovalModal() {
+    claudeApprovalOverlay.classList.remove('is-open');
+  }
+
+  function answerClaudeApproval(approve) {
+    var jobId = claudeApprovalOverlay.dataset.jobId;
+    closeClaudeApprovalModal();
+    if (!jobId) return;
+    api('/api/orchestrator/jobs/' + jobId + '/approve', { method: 'POST', body: { approve: approve } })
+      .then(function (job) { handleOrchestratorJob(job); })
+      .catch(function (err) {
+        setOrchestratorBusy(false);
+        hideOrchestratorStatus();
+        toast(err.message, true);
+      });
+  }
+
+  claudeApproveBtn.addEventListener('click', function () { answerClaudeApproval(true); });
+  claudeDeclineBtn.addEventListener('click', function () { answerClaudeApproval(false); });
+  // Dismissing without an explicit choice (backdrop click / Escape) is
+  // treated the same as declining — BrixOS should never end up spending
+  // paid Claude credits from an ambiguous dismissal, only from an explicit
+  // "Continue with Claude".
+  claudeApprovalOverlay.addEventListener('click', function (e) { if (e.target === claudeApprovalOverlay) answerClaudeApproval(false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && claudeApprovalOverlay.classList.contains('is-open')) answerClaudeApproval(false);
+  });
+
+  function handleOrchestratorJob(job) {
+    if (job.status === 'AWAITING_APPROVAL') {
+      showOrchestratorStatus(job);
+      openClaudeApprovalModal(job.id);
+      return;
+    }
+
+    if (job.status === 'READY') {
+      stopOrchestratorPolling();
+      setOrchestratorBusy(false);
+      hideOrchestratorStatus();
+      state.profile = job.profile;
+      state.score = job.score;
+      renderPopover(); renderChips(); renderScoreUI();
+      toast('Your rebuilt site is ready — check the preview panel.');
+      return;
+    }
+
+    if (job.status === 'FAILED') {
+      stopOrchestratorPolling();
+      setOrchestratorBusy(false);
+      hideOrchestratorStatus();
+      toast(job.message || 'Generation failed — try again in a moment.', true);
+      return;
+    }
+
+    // still in progress — keep polling
+    showOrchestratorStatus(job);
+    orchestratorPollTimer = setTimeout(function () { pollOrchestratorJob(job.id); }, 1200);
+  }
+
+  function pollOrchestratorJob(jobId) {
+    api('/api/orchestrator/jobs/' + jobId)
+      .then(handleOrchestratorJob)
+      .catch(function (err) {
+        stopOrchestratorPolling();
+        setOrchestratorBusy(false);
+        hideOrchestratorStatus();
+        toast(err.message, true);
+      });
+  }
 
   function generateSite() {
     if (!state.authed) {
@@ -703,31 +834,26 @@
       openAuthModal('login');
       return;
     }
-    if (generateBtn.disabled) return;
+    if (orchestratorBusy) return;
 
-    var prevLabel = generateBtn.textContent;
-    generateBtn.disabled = true;
-    generateBtn.textContent = 'Generating…';
-    previewBody.classList.add('is-loading');
+    setOrchestratorBusy(true);
+    showOrchestratorStatus({ status: 'QUEUED' });
 
-    api('/api/generate', { method: 'POST' })
-      .then(function (data) {
-        state.profile = data.profile;
-        state.score = data.score;
-        renderScoreUI();
-        toast('Your rebuilt site is ready.');
-      })
+    api('/api/orchestrator/generate', { method: 'POST' })
+      .then(handleOrchestratorJob)
       .catch(function (err) {
+        setOrchestratorBusy(false);
+        hideOrchestratorStatus();
         toast(err.message, true);
-      })
-      .finally(function () {
-        generateBtn.disabled = false;
-        generateBtn.textContent = prevLabel;
-        previewBody.classList.remove('is-loading');
       });
   }
 
   generateBtn.addEventListener('click', generateSite);
+
+  exportZipBtn.addEventListener('click', function () {
+    if (!state.authed) { toast('Sign in first.', true); return; }
+    window.location.href = '/api/orchestrator/export';
+  });
 
   Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (chip) {
     chip.addEventListener('click', function () {

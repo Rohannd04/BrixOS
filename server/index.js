@@ -16,6 +16,7 @@ const generate = require('./generate');
 const chat = require('./chat');
 const llm = require('./llm');
 const { auditWebsite, auditImprovements } = require('./audit');
+const { buildOrchestratorRouter } = require('./orchestratorRoutes');
 
 const PORT = process.env.PORT || 3000;
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
@@ -385,6 +386,17 @@ app.post('/api/chat', requireAuth, chatLimiter, async (req, res) => {
     res.status(502).json({ error: 'Chat failed — the AI service returned an error.' + errDetail(err) + ' Try again in a moment.' });
   }
 });
+
+// ---------------------------------------------------------------------------
+// BrixOS Orchestrator — UNDERSTAND -> RESEARCH -> PLAN -> ARCHITECT ->
+// GENERATE -> VALIDATE -> FIX -> PREVIEW, plus ZIP export and the paid-
+// Claude-usage approval gate. See server/orchestrator.js and
+// server/orchestratorRoutes.js. Mounted as its own router so none of the
+// existing routes above (auth, profile, uploads, /api/generate, /api/chat)
+// had to change for this to exist.
+// ---------------------------------------------------------------------------
+
+app.use('/api/orchestrator', buildOrchestratorRouter({ requireAuth }));
 
 // ---------------------------------------------------------------------------
 

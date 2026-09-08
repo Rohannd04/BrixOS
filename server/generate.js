@@ -327,5 +327,9 @@ function buildSiteLocal(plan, profile) {
 
 module.exports = {
   isConfigured, planSite, buildSite, PLANNER_MODEL, BUILDER_MODEL,
-  planSiteLocal, buildSiteLocal
+  planSiteLocal, buildSiteLocal,
+  // exported for server/orchestrator.js, which builds its own multi-page
+  // plan/prompts but wants the same "what do we actually know about this
+  // business" brief instead of a second, drifting copy of this logic
+  profileBrief
 };

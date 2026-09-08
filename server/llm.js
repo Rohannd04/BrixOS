@@ -258,34 +258,81 @@ async function callOpenRouterWithRetry(args) {
 // Public calls
 // ---------------------------------------------------------------------------
 
+// Single-turn call helpers, one per real provider — factored out so both the
+// provider-agnostic chatOnce() below (used by the existing Planner/Builder/
+// chat pipeline, which follows whichever ONE provider is "configured") and
+// the orchestrator's direct, per-stage provider picks (server/orchestrator.js
+// — which may want Claude for reasoning and OpenRouter for generation in the
+// very same run) share one implementation instead of two copies drifting
+// apart. Neither helper reads the module-level PROVIDER constant — each
+// throws NOT_CONFIGURED on its own if its own key is missing, regardless of
+// which provider (if any) is the "default" one.
+async function anthropicComplete({ role, system, userText, tools, forceToolName, maxTokens }) {
+  const anthropic = getAnthropic();
+  if (!anthropic) throw new Error('NOT_CONFIGURED');
+  const model = (role && ANTHROPIC_MODELS[role]) || ANTHROPIC_DEFAULT_MODEL;
+  const resp = await anthropic.messages.create({
+    model,
+    max_tokens: maxTokens,
+    system,
+    tools,
+    tool_choice: forceToolName ? { type: 'tool', name: forceToolName } : undefined,
+    messages: [{ role: 'user', content: userText }]
+  });
+  const toolUse = resp.content.find((b) => b.type === 'tool_use');
+  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  return { text, toolInput: toolUse ? toolUse.input : null, model };
+}
+
+async function openRouterComplete({ system, userText, tools, forceToolName, maxTokens }) {
+  if (!OPENROUTER_KEY) throw new Error('NOT_CONFIGURED');
+  const { data, model } = await callOpenRouterWithRetry({ system, messages: [{ role: 'user', content: userText }], tools, forceToolName, maxTokens });
+  const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+  const toolCall = (msg.tool_calls || [])[0];
+  return { text: (msg.content || '').trim(), toolInput: toolCall ? safeParseJson(toolCall.function.arguments) : null, model };
+}
+
 // Single-turn call, with an optional forced tool call (used by the Planner
 // to guarantee structured JSON output). Returns { text, toolInput, model }.
+// Follows the module's single "configured" PROVIDER (Anthropic if its key is
+// set, else OpenRouter) — this is the existing behavior generate.js/chat.js
+// have always relied on. Left untouched so nothing that already works
+// changes; see claudeConfigured/openRouterConfigured/callClaudeDirect/
+// callOpenRouterDirect below for the orchestrator's independent, per-stage
+// provider selection.
 async function chatOnce({ role, system, userText, tools, forceToolName, maxTokens }) {
-  if (PROVIDER === 'anthropic') {
-    const anthropic = getAnthropic();
-    if (!anthropic) throw new Error('NOT_CONFIGURED');
-    const model = ANTHROPIC_MODELS[role] || ANTHROPIC_DEFAULT_MODEL;
-    const resp = await anthropic.messages.create({
-      model,
-      max_tokens: maxTokens,
-      system,
-      tools,
-      tool_choice: forceToolName ? { type: 'tool', name: forceToolName } : undefined,
-      messages: [{ role: 'user', content: userText }]
-    });
-    const toolUse = resp.content.find((b) => b.type === 'tool_use');
-    const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    return { text, toolInput: toolUse ? toolUse.input : null, model };
-  }
-
-  if (PROVIDER === 'openrouter') {
-    const { data, model } = await callOpenRouterWithRetry({ system, messages: [{ role: 'user', content: userText }], tools, forceToolName, maxTokens });
-    const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
-    const toolCall = (msg.tool_calls || [])[0];
-    return { text: (msg.content || '').trim(), toolInput: toolCall ? safeParseJson(toolCall.function.arguments) : null, model };
-  }
-
+  if (PROVIDER === 'anthropic') return anthropicComplete({ role, system, userText, tools, forceToolName, maxTokens });
+  if (PROVIDER === 'openrouter') return openRouterComplete({ system, userText, tools, forceToolName, maxTokens });
   throw new Error('NOT_CONFIGURED');
+}
+
+// ---------------------------------------------------------------------------
+// Direct, per-stage provider access for the BrixOS Orchestrator
+// (server/orchestrator.js). Unlike chatOnce()/runToolLoop() above, these
+// don't defer to the single module-level PROVIDER pick — the orchestrator
+// deliberately wants Claude for reasoning (planning, studying, review) and
+// an OpenRouter/open-source model for generation work in the SAME run, so it
+// needs to reach either provider on demand, independent of which one (if
+// either) generate.js/chat.js would default to. Each throws NOT_CONFIGURED
+// (not a silent fallback) when its own API key isn't set, so callers can
+// decide what to do next themselves (try the other provider, fall back to a
+// local template, or surface the gap to the user).
+// ---------------------------------------------------------------------------
+
+function claudeConfigured() {
+  return Boolean(ANTHROPIC_KEY);
+}
+
+function openRouterConfigured() {
+  return Boolean(OPENROUTER_KEY);
+}
+
+async function callClaudeDirect(args) {
+  return anthropicComplete(args);
+}
+
+async function callOpenRouterDirect(args) {
+  return openRouterComplete(args);
 }
 
 // Multi-turn agentic loop (used by chat.js). Tool execution is delegated
@@ -362,4 +409,8 @@ async function runToolLoop({ role, system, message, history, tools, maxTurns, on
   throw new Error('NOT_CONFIGURED');
 }
 
-module.exports = { isConfigured, providerName, chatOnce, runToolLoop };
+module.exports = {
+  isConfigured, providerName, chatOnce, runToolLoop,
+  // orchestrator-facing direct provider access (see the comment above)
+  claudeConfigured, openRouterConfigured, callClaudeDirect, callOpenRouterDirect
+};

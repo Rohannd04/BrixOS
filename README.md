@@ -35,8 +35,17 @@ server/
   score.js     The presence score model — single source of truth,
                mirrored (read-only) in public/app.js for the signed-out demo
   validate.js  Format-only validation for every profile field
-  generate.js  The site-generation agent pipeline (see below)
+  generate.js  The one-shot Planner -> Builder pipeline (see below) — also
+               the Orchestrator's local, no-API-key fallback templates
   chat.js      The console's chat agent (see below)
+  llm.js       Model provider abstraction (Anthropic / OpenRouter) shared
+               by generate.js, chat.js, and the Orchestrator
+  orchestrator.js         The BrixOS Orchestrator — the real, multi-page,
+                          validate/fix/iterate pipeline (see below)
+  orchestratorValidate.js Structural validation for a generated page
+  orchestratorRoutes.js   /api/orchestrator/* routes
+  zipBuilder.js           Dependency-free ZIP writer, used by ZIP export
+  audit.js     Live website audit (server/audit.js's own header has details)
 public/
   index.html   Markup
   styles.css   All styling
@@ -80,6 +89,102 @@ ever fails with a "model not found" error, that's the one line to update;
 check https://docs.claude.com/en/docs/about-claude/models for the current
 identifier.
 
+This one-shot `/api/generate` endpoint still exists exactly as described
+above (nothing about it changed) — it's what the Orchestrator below now
+uses under the hood as its local, no-API-key fallback template.
+
+## The BrixOS Orchestrator — the real, multi-page pipeline behind the button
+
+Clicking **"Generate my site"** actually runs `server/orchestrator.js`, a
+central controller that turns a business profile into a real, validated,
+multi-page website:
+
+```
+UNDERSTAND -> RESEARCH -> PLAN -> ARCHITECT -> GENERATE -> VALIDATE
+  -> FIX (iterate, capped) -> PREVIEW
+```
+
+- **UNDERSTAND / RESEARCH ("Studying…")** — pulls together everything on
+  file for the business, plus a live audit of its existing website if it
+  has one (`server/audit.js`), and explicitly lists what's *missing* rather
+  than letting a later stage invent it.
+- **PLAN ("Creating your website architecture…")** — decides the site's
+  full page list (home, about, contact, ...), each page's sections and
+  copy direction, a design system (accent color, tone), and SEO/AEO/GEO
+  strategy — forced through a tool call, so it's always structured, valid
+  JSON, never scraped out of prose.
+- **ARCHITECT ("Breaking the site into pages…")** — turns that plan into a
+  concrete generation task per page.
+- **GENERATE ("Generating your pages…")** — writes each page's actual HTML.
+  Independent pages generate concurrently (`ORCHESTRATOR_CONCURRENCY`,
+  default 3) rather than one at a time.
+- **VALIDATE ("Checking your site for issues…")** — a real, dependency-free
+  structural check per page (`server/orchestratorValidate.js`): a
+  `<!doctype html>`, a non-empty `<title>`, a mobile viewport tag,
+  balanced `<html>`/`<head>`/`<body>`/`<script>`/`<style>` tags, no
+  leftover `{{ template }}` placeholders, and that the sections the plan
+  actually asked for showed up on the page — plus a cross-page check that
+  every nav link actually points at a page that exists.
+- **FIX ("Fixing issues it found…")** — a page that fails validation gets
+  sent back to the generation step with the specific errors, up to
+  `MAX_GENERATION_ITERATIONS` times (default 3), before BrixOS gives up and
+  shows its best attempt rather than looping forever.
+- **PREVIEW** — the finished project is saved to your profile as
+  `generatedProject` (every page's HTML, plus the plan) and its home page
+  feeds the same `generatedSite` / preview `<iframe>` the simpler pipeline
+  above already used — nothing about the preview panel itself changed.
+
+Because a full run can take a little while, `POST /api/orchestrator/generate`
+returns immediately with a job id and does the work in the background;
+the page polls `GET /api/orchestrator/jobs/:id` every ~1.2s and shows the
+current stage ("Studying your business…", "Fixing issues it found…", ...)
+above the preview panel until it's done.
+
+### Two providers, two different jobs
+
+- **Claude is the reasoning engine** — understanding the request, studying
+  the business, planning the architecture, and interpreting follow-up
+  change requests. **It is never called unless you've explicitly approved
+  paid Claude usage for your account.** The first time BrixOS would need
+  it, generation pauses and asks: *"Claude API usage may incur charges for
+  this operation. Do you want to continue with Claude API?"* — your answer
+  (`POST /api/orchestrator/claude-approval` or the same prompt mid-job) is
+  remembered on your account (`profile.claudeApprovalGranted`) so you're
+  only asked once. Say no and BrixOS falls back to OpenRouter/local
+  instead of failing outright. If `ANTHROPIC_API_KEY` isn't set at all,
+  there's nothing paid to ask about and this never comes up.
+- **OpenRouter is the generation worker** — turning an approved plan into
+  actual page HTML, using the same free-tier auto-selection described
+  below. No approval needed; BrixOS only ever asks it for free models.
+- Neither configured (or Claude declined with no OpenRouter key)? Every
+  stage falls back to the same deterministic, local, no-API-key templates
+  the rest of BrixOS already uses — you still get a real multi-page site,
+  just from templates instead of a model.
+
+This is a genuinely pluggable provider setup
+(`server/llm.js`'s `callClaudeDirect`/`callOpenRouterDirect`, independent of
+which single provider `chatOnce`/`runToolLoop` use for the older Planner/
+Builder/chat pipeline) — adding a third provider later means writing one
+more `call*Direct`-shaped function, not restructuring the orchestrator.
+
+### Making a change afterward
+
+Once a site exists, `POST /api/orchestrator/modify` with `{ "instruction":
+"..." }` (e.g. *"make the hero more premium"*, *"add a testimonials
+section"*) figures out which existing page that applies to, regenerates
+**only that page**, validates/fixes it the same way, and leaves every other
+page untouched — it never rebuilds the whole site for a one-line request.
+
+### Exporting the result
+
+`GET /api/orchestrator/export` ("Download ZIP" in the UI) packages every
+generated page into a real `.zip` (`server/zipBuilder.js` — a small,
+dependency-free ZIP writer using Node's built-in `zlib` for compression, not
+a new npm package) that opens in any unzip tool. This is the fallback/output
+option for when you want the actual files rather than just the in-app
+preview — useful today since BrixOS doesn't host the generated site anywhere
+itself yet (see "What's real vs. what's a placeholder" below).
+
 ## Chat — a third agent, at the console
 
 The console at the top of the page (type + Enter, or click one of the
@@ -118,9 +223,16 @@ weighted model your team specified), photo/file uploads (image-only for
 Photos, a slightly wider allow-list for Files), and every link/text field —
 all persisted to `data/db.json` and reloaded on refresh or next login.
 
-Also real, once you set `ANTHROPIC_API_KEY` (see above): the **"Generate my
-site"** button runs a real two-agent pipeline (`server/generate.js`) and the
-"Generated preview" panel renders the actual HTML it produces.
+Also real: the **"Generate my site"** button runs the actual BrixOS
+Orchestrator (`server/orchestrator.js`) — a real multi-page plan, real
+per-page generation, real structural validation with an actual fix/retry
+loop, and a real ZIP export (`server/zipBuilder.js`) you can open in any
+unzip tool. With neither `ANTHROPIC_API_KEY` nor `OPENROUTER_API_KEY` set,
+every stage runs on deterministic local templates instead of a model call —
+still a real, validated, multi-page result, just not model-written copy.
+Set either key (see above) to get real model-written plans and pages; set
+`ANTHROPIC_API_KEY` specifically and you'll be asked, once, whether BrixOS
+may spend paid Claude credits on your account's runs before it ever does.
 
 **Placeholder, by design:** BrixOS does **not** verify that a pasted
 Instagram/Facebook/website link actually resolves to a real, matching
