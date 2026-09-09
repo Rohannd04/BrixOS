@@ -129,6 +129,31 @@ const PALETTE_KEYWORDS = [
   ['warm-earthy', ['bakery', 'cafe', 'coffee', 'pottery', 'ceramic', 'boutique', 'florist', 'restaurant', 'diner', 'kitchen', 'catering', 'craft', 'handmade', 'artisan', 'decor', 'furniture', 'tailor', 'jewelry']]
 ];
 
+// ---------------------------------------------------------------------------
+// layouts — a second, deterministically-picked structural variant, not just
+// a palette swap. "Classic" is the original centered/stacked layout above;
+// "split" is a visual-forward alternative (side-by-side hero, a magazine-
+// style numeral pull next to each content band) for businesses where a real
+// photo is the strongest selling point (cafes, boutiques, salons, bakeries).
+// Picked from the palette a business already resolved to (see pickPalette
+// below) rather than a second keyword list — the same category signal that
+// picked a warm/soft palette also tends to want a photo-led layout, so this
+// stays a single, coherent decision instead of two that could contradict
+// each other. Persisted on plan.design_system.layoutId (same pattern as
+// paletteId) so a later "modify" job never reshuffles a project's structure.
+// ---------------------------------------------------------------------------
+
+const LAYOUTS = {
+  classic: { id: 'classic', label: 'Classic centered' },
+  split: { id: 'split', label: 'Visual-forward split' }
+};
+
+const SPLIT_LAYOUT_PALETTES = new Set(['soft-pastel', 'warm-earthy']);
+
+function pickLayout(palette) {
+  return LAYOUTS[SPLIT_LAYOUT_PALETTES.has(palette && palette.id) ? 'split' : 'classic'];
+}
+
 function pickPalette(profile, plan) {
   const text = [
     profile && profile.business,
@@ -246,27 +271,33 @@ function contactLinks(profile) {
 // section renderers
 // ---------------------------------------------------------------------------
 
-function renderHero(section, plan, profile, palette, heroPhoto) {
+function renderHero(section, plan, profile, palette, heroPhoto, layoutId) {
   const eyebrow = toneEyebrow(plan);
   const strip = keywordStrip(plan);
   const links = contactLinks(profile).slice(0, 1);
+  // The side-by-side split only makes sense with a real photo to put next
+  // to the text — with no photo, fall back to the classic centered layout
+  // even when a business's palette picked "split".
+  const useSplit = layoutId === 'split' && Boolean(heroPhoto);
 
   const visual = heroPhoto
     ? `<div class="bx-hero-photo"><img src="${heroPhoto}" alt="${escapeHtml(plan.business_understanding ? '' : '')}${escapeHtml((profile && profile.business) || 'Business photo')}" loading="eager"></div>`
     : `<div class="bx-hero-art" aria-hidden="true"><span class="bx-blob bx-blob-a"></span><span class="bx-blob bx-blob-b"></span><span class="bx-blob bx-blob-c"></span></div>`;
 
   return `
-  <section class="bx-hero">
-    <div class="bx-hero-inner">
-      <p class="bx-eyebrow bx-eyebrow-on-band">${escapeHtml(eyebrow)}</p>
-      <h1>${escapeHtml(section.headline)}</h1>
-      <p class="bx-hero-sub">${escapeHtml(section.body)}</p>
-      <div class="bx-hero-actions">
-        <a class="bx-btn bx-btn-primary" href="contact.html">${escapeHtml(section.cta || 'Get in touch')} <span aria-hidden="true">&#8599;</span></a>
-        ${links.map((l) => `<a class="bx-quiet-link bx-quiet-link-on-band" href="${escapeHtml(l.href)}" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('')}
+  <section class="bx-hero${useSplit ? ' bx-hero-split' : ''}">
+    <div class="bx-hero-row">
+      <div class="bx-hero-inner">
+        <p class="bx-eyebrow bx-eyebrow-on-band">${escapeHtml(eyebrow)}</p>
+        <h1>${escapeHtml(section.headline)}</h1>
+        <p class="bx-hero-sub">${escapeHtml(section.body)}</p>
+        <div class="bx-hero-actions">
+          <a class="bx-btn bx-btn-primary" href="contact.html">${escapeHtml(section.cta || 'Get in touch')} <span aria-hidden="true">&#8599;</span></a>
+          ${links.map((l) => `<a class="bx-quiet-link bx-quiet-link-on-band" href="${escapeHtml(l.href)}" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('')}
+        </div>
       </div>
+      ${visual}
     </div>
-    ${visual}
     ${strip.length ? `<div class="bx-strip"><div class="bx-strip-track">${strip.map((s) => `<span>${escapeHtml(s)}</span><span class="bx-strip-dot" aria-hidden="true">&#10022;</span>`).join('')}</div></div>` : ''}
   </section>`;
 }
@@ -335,21 +366,34 @@ function renderExtraForType(type, plan, profile, extraPhotos) {
 // A standard alternating-band content section — the workhorse of every page
 // after its header. `index` drives both the numbered eyebrow and the
 // light/dark alternation.
-function renderBand(section, index, isDark, plan, profile, extraPhotos) {
+function renderBand(section, index, isDark, plan, profile, extraPhotos, layoutId) {
   const { lede, rest } = splitLede(section.body);
   const num = numberLabel(index);
   const typeLabel = String(section.type || 'more').toUpperCase();
   const extra = renderExtraForType(section.type, plan, profile, extraPhotos);
+  const isSplit = layoutId === 'split';
+
+  // The "split" layout's magazine-style pull numeral replaces the classic
+  // layout's small numbered eyebrow label with a large faded numeral set in
+  // its own column beside the text — a genuinely different structural feel,
+  // not just a recolor of the same markup.
+  const numeralColumn = isSplit ? `<div class="bx-band-num" aria-hidden="true">${num}</div>` : '';
+  const eyebrowLine = isSplit
+    ? `<p class="bx-eyebrow ${isDark ? 'bx-eyebrow-on-band' : ''}">${escapeHtml(typeLabel)}</p>`
+    : `<p class="bx-eyebrow ${isDark ? 'bx-eyebrow-on-band' : ''}">${num} / ${escapeHtml(typeLabel)}</p>`;
 
   return `
-  <section class="bx-band ${isDark ? 'bx-band-dark' : 'bx-band-light'}">
+  <section class="bx-band ${isDark ? 'bx-band-dark' : 'bx-band-light'}${isSplit ? ' bx-band-split' : ''}">
     <div class="bx-band-inner">
-      <p class="bx-eyebrow ${isDark ? 'bx-eyebrow-on-band' : ''}">${num} / ${escapeHtml(typeLabel)}</p>
-      <h2>${escapeHtml(section.headline)}</h2>
-      <p class="bx-lede">${escapeHtml(lede)}</p>
-      ${rest ? `<p class="bx-body">${escapeHtml(rest)}</p>` : ''}
-      ${section.cta ? `<a class="bx-arrow-link" href="contact.html">${escapeHtml(section.cta)} <span aria-hidden="true">&#8594;</span></a>` : ''}
-      ${extra}
+      ${numeralColumn}
+      <div class="bx-band-content">
+        ${eyebrowLine}
+        <h2>${escapeHtml(section.headline)}</h2>
+        <p class="bx-lede">${escapeHtml(lede)}</p>
+        ${rest ? `<p class="bx-body">${escapeHtml(rest)}</p>` : ''}
+        ${section.cta ? `<a class="bx-arrow-link" href="contact.html">${escapeHtml(section.cta)} <span aria-hidden="true">&#8594;</span></a>` : ''}
+        ${extra}
+      </div>
     </div>
   </section>`;
 }
@@ -385,6 +429,7 @@ function css(palette) {
   nav.bx-nav a:hover { opacity: 1; }
 
   .bx-hero { position: relative; padding: 56px 6vw 0; overflow: hidden; background: var(--band); color: var(--band-text); }
+  .bx-hero-row { display: block; }
   .bx-hero-inner { max-width: 760px; margin: 0 auto; text-align: center; padding-bottom: 40px; }
   .bx-hero h1 { font-family: var(--font-heading); font-weight: 800; font-size: clamp(34px, 6vw, 58px); line-height: 1.05; margin: 0 0 20px; color: var(--band-text); }
   .bx-hero-sub { color: var(--band-muted); font-size: 18px; max-width: 560px; margin: 0 auto 30px; }
@@ -404,6 +449,29 @@ function css(palette) {
   .bx-strip-track { display: flex; gap: 28px; padding: 12px 6vw; flex-wrap: wrap; justify-content: center; font-size: 13px; font-weight: 600; letter-spacing: .04em; }
   .bx-strip-dot:last-child { display: none; }
   .bx-strip span:last-child.bx-strip-dot { display: none; }
+
+  /* "split" layout — a visual-forward alternative to the centered layout
+     above, picked deterministically for photo-led categories (see
+     pickLayout()): the hero runs text/photo side-by-side instead of
+     stacked-and-centered, and each content band gets a large faded pull
+     numeral in its own column instead of a small numbered label. */
+  .bx-hero-split .bx-hero-row { max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: 1.1fr 1fr; align-items: center; gap: 44px; padding-bottom: 56px; }
+  .bx-hero-split .bx-hero-inner { max-width: none; margin: 0; text-align: left; padding-bottom: 0; }
+  .bx-hero-split .bx-hero-actions { justify-content: flex-start; }
+  .bx-hero-split .bx-hero-photo { margin: 0; aspect-ratio: 4/5; }
+  @media (max-width: 860px) {
+    .bx-hero-split .bx-hero-row { grid-template-columns: 1fr; text-align: center; }
+    .bx-hero-split .bx-hero-inner { text-align: center; }
+    .bx-hero-split .bx-hero-actions { justify-content: center; }
+  }
+
+  .bx-band-split .bx-band-inner { max-width: 940px; display: grid; grid-template-columns: 100px 1fr; gap: 28px; align-items: start; }
+  .bx-band-split .bx-band-num { font-family: var(--font-heading); font-weight: 800; font-size: 60px; line-height: 1; color: var(--accent); opacity: .32; }
+  .bx-band-split.bx-band-dark .bx-band-num { color: var(--accent-2); }
+  @media (max-width: 640px) {
+    .bx-band-split .bx-band-inner { grid-template-columns: 1fr; gap: 10px; }
+    .bx-band-split .bx-band-num { font-size: 38px; }
+  }
 
   .bx-pageheader { background: var(--band); color: var(--band-text); padding: 64px 6vw 56px; text-align: center; }
   .bx-pageheader h1 { font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px, 5vw, 46px); margin: 0 0 12px; }
@@ -457,7 +525,7 @@ function css(palette) {
   `;
 }
 
-function renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, photos }) {
+function renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, photos, layoutId }) {
   const businessName = (profile && profile.business) || (plan.pages && plan.pages[0] && plan.pages[0].title) || 'Your Business';
   const navHtml = allTasks.map((t) => `<a href="${t.slug}.html">${escapeHtml(t.navLabel)}</a>`).join('');
   const isHome = task.slug === homeSlug;
@@ -470,12 +538,12 @@ function renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, phot
   let bandIndex = 1;
   sections.forEach((section, i) => {
     if (i === 0 && isHome && section.type === 'hero') {
-      bodyHtml += renderHero(section, plan, profile, palette, heroPhoto);
+      bodyHtml += renderHero(section, plan, profile, palette, heroPhoto, layoutId);
     } else if (i === 0) {
       bodyHtml += renderPageHeader(section, plan, profile, galleryPhotos);
     } else {
       const isDark = bandIndex % 2 === 0;
-      bodyHtml += renderBand(section, bandIndex, isDark, plan, profile, galleryPhotos);
+      bodyHtml += renderBand(section, bandIndex, isDark, plan, profile, galleryPhotos, layoutId);
       bandIndex++;
     }
   });
@@ -519,6 +587,8 @@ function renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, phot
 module.exports = {
   PALETTES,
   pickPalette,
+  LAYOUTS,
+  pickLayout,
   collectPhotoDataUris,
   renderSitePage,
   PREVIEW_SAFE_NAV_SCRIPT,

@@ -65,6 +65,19 @@ function emptyProfile() {
     //   rating, userRatingCount, openNow, weekdayDescriptions, fetchedAt }
     placeInfo: null,
 
+    // A Google Business Profile match found for a just-pasted map link,
+    // staged here WITHOUT being applied yet — set by the map-link handlers
+    // in server/index.js and server/chat.js the moment places.js resolves a
+    // match, cleared the moment the user confirms or declines it (see
+    // POST /api/profile/place/confirm and the yes/no chat intercept in
+    // server/chat.js). This exists so BrixOS always asks "is this your
+    // business?" before treating a Places match as accepted, instead of
+    // silently overwriting profile.business/profile.placeInfo/profile.photos
+    // the instant a link resolves. Shape: { place, photos, mapValue, savedAt }
+    // — `place`/`photos` are exactly what places.enrichFromMapsLink()
+    // returned; `mapValue` is the map link this match was found for.
+    pendingPlace: null,
+
     // BrixOS Orchestrator (server/orchestrator.js) state — separate from the
     // simpler one-shot generatedSite above:
     //   generatedProject  — the full multi-page site the Orchestrator last

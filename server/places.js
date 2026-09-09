@@ -274,6 +274,31 @@ async function enrichFromMapsLink(mapUrl) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// pendingPlace apply/discard — enrichFromMapsLink() above only fetches and
+// normalizes, it never touches the profile itself; callers (server/index.js,
+// server/chat.js) stage its result on profile.pendingPlace instead of
+// applying it immediately, so BrixOS always asks "is this your business?"
+// first. This is the one function that actually merges (or discards) that
+// staged match into the profile once the user has answered — shared here so
+// every call site (the PUT /api/profile/:field route, the real chat agent's
+// tool call, and the local no-API-key chat fallback) applies/discards it
+// identically. Mutates `profile` in place; the caller is still responsible
+// for writeDB(db).
+// ---------------------------------------------------------------------------
+
+function applyPendingPlace(profile, confirm) {
+  const pending = profile.pendingPlace;
+  if (!pending) return { applied: false, reason: 'NO_PENDING' };
+  profile.pendingPlace = null;
+  if (!confirm) return { applied: false, declined: true };
+
+  profile.placeInfo = pending.place;
+  if (!profile.business && pending.place && pending.place.name) profile.business = pending.place.name;
+  if (pending.photos && pending.photos.length) profile.photos = profile.photos.concat(pending.photos);
+  return { applied: true, place: pending.place, photosAdded: (pending.photos || []).length };
+}
+
 function placeSummaryLine(place) {
   if (!place) return '';
   const bits = [];
@@ -289,6 +314,7 @@ module.exports = {
   configured,
   enrichFromMapsLink,
   placeSummaryLine,
+  applyPendingPlace,
   // exported for tests / debugging only
   extractHintsFromUrl,
   categoryFromTypes

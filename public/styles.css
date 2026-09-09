@@ -525,13 +525,14 @@ body.is-workspace .hero {
   padding-bottom: 0;
 }
 
-/* #panelSection stays visible in workspace mode, but by this point its
-   #previewCard has already been relocated into .workspace-right (see
-   enterWorkspaceMode in app.js) — only #scoreCard (the detailed 7-metric
-   breakdown) is left inside it, so it collapses to a single centered
-   column and renders BELOW the chat+preview workspace instead of its
-   normal side-by-side spot. The compact ring above chat (#wsScore) stays
-   the only score readout up top. */
+/* #panelSection stays visible in workspace mode. #scoreCard (the detailed
+   7-metric breakdown) always renders here. #previewCard ALSO stays here
+   (with its "Generate my site" button reachable) until a generation job
+   actually starts and activatePreviewPanel() (app.js) relocates it into
+   .workspace-right — until then this collapses to a single centered
+   column and renders BELOW the chat workspace instead of its normal
+   side-by-side spot. The compact ring above chat (#wsScore) stays the
+   only score readout up top. */
 body.is-workspace #panelSection {
   grid-template-columns: 1fr;
   max-width: 720px;
@@ -542,18 +543,34 @@ body.is-workspace #panelSection {
 .workspace { display: none; }
 
 .workspace.is-active {
-  display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr;
-  align-items: start;
-  gap: 24px;
+  display: block;
   max-width: 1280px;
   margin: 28px auto 96px;
   padding: 0 24px;
   position: relative; z-index: 6;
 }
 
+.workspace .ws-score { margin-bottom: 16px; }
+
+/* The actual two-column layout. It starts as a single column — the right
+   track isn't reserved at all — so nothing can peek out on the right
+   before a generation job exists; .has-preview (added by
+   activatePreviewPanel() in app.js, the moment generation actually starts)
+   is what introduces the right column and moves the preview card into it. */
+.workspace-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 24px;
+}
+
+.workspace-grid.has-preview {
+  grid-template-columns: minmax(300px, 380px) 1fr;
+}
+
 .workspace-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .workspace-right { min-width: 0; }
+.workspace-right[hidden] { display: none; }
 
 /* the moved .console loses its centered-hero sizing and becomes a normal
    full-width column item */
@@ -612,7 +629,7 @@ body.is-workspace #panelSection {
 }
 
 @media (max-width: 860px) {
-  .workspace.is-active { grid-template-columns: 1fr; }
+  .workspace-grid.has-preview { grid-template-columns: 1fr; }
 }
 
 /* ---------- pipeline ---------- */

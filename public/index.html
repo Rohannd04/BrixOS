@@ -63,27 +63,38 @@
   </section>
 
   <div class="workspace" id="workspaceView" hidden>
-    <div class="workspace-left" id="workspaceLeft">
-      <div class="ws-score" id="wsScore" hidden role="button" tabindex="0" aria-label="View full score breakdown">
-        <div class="ws-score-ring">
-          <svg viewBox="0 0 56 56" aria-hidden="true">
-            <circle class="ws-ring-track" cx="28" cy="28" r="24"/>
-            <circle class="ws-ring-fill" id="wsRingFill" cx="28" cy="28" r="24" transform="rotate(-90 28 28)"/>
-          </svg>
-          <span class="ws-score-num mono" id="wsScoreNum">--</span>
-        </div>
-        <div class="ws-score-info">
-          <div class="ws-score-title display" id="wsScoreTitle">Live scan</div>
-          <div class="ws-score-status mono" id="wsScoreStatus">Add details to run a scan</div>
-        </div>
-        <svg class="ws-score-view" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div class="ws-score" id="wsScore" hidden role="button" tabindex="0" aria-label="View full score breakdown">
+      <div class="ws-score-ring">
+        <svg viewBox="0 0 56 56" aria-hidden="true">
+          <circle class="ws-ring-track" cx="28" cy="28" r="24"/>
+          <circle class="ws-ring-fill" id="wsRingFill" cx="28" cy="28" r="24" transform="rotate(-90 28 28)"/>
+        </svg>
+        <span class="ws-score-num mono" id="wsScoreNum">--</span>
       </div>
-      <div class="ws-improve" id="wsImprove" hidden>
-        <span class="ws-improve-label mono">SECTIONS TO IMPROVE</span>
-        <div class="ws-improve-tags" id="wsImproveTags"></div>
+      <div class="ws-score-info">
+        <div class="ws-score-title display" id="wsScoreTitle">Live scan</div>
+        <div class="ws-score-status mono" id="wsScoreStatus">Add details to run a scan</div>
       </div>
+      <svg class="ws-score-view" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
-    <div class="workspace-right" id="workspaceRight"></div>
+    <!-- The score ring sits full-width above this grid (not inside either
+         column) so the chat panel and the preview panel both start flush at
+         the SAME top edge — previously the score ring + "sections to
+         improve" box stacked only above the chat column, pushing it down
+         while the preview column started higher, which read as misaligned. -->
+    <div class="workspace-grid" id="workspaceGrid">
+      <div class="workspace-left" id="workspaceLeft">
+        <div class="ws-improve" id="wsImprove" hidden>
+          <span class="ws-improve-label mono">SECTIONS TO IMPROVE</span>
+          <div class="ws-improve-tags" id="wsImproveTags"></div>
+        </div>
+      </div>
+      <!-- Right column stays out of the layout (no grid track reserved for
+           it) until a generation job actually starts — see
+           activatePreviewPanel() in app.js — so it is never visible while
+           nothing is generating. -->
+      <div class="workspace-right" id="workspaceRight" hidden></div>
+    </div>
   </div>
 
   <div class="pipeline">

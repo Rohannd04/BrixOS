@@ -224,14 +224,16 @@ app.put('/api/profile/:field', requireAuth, async (req, res) => {
   // when a Google Places API key is configured (server/places.js), saving
   // or changing it fetches the real Google Business Profile: name,
   // category, address, phone, hours, rating, and photos, synchronously,
-  // the same pattern as the website audit above.
+  // the same pattern as the website audit above. It is NOT applied to the
+  // profile yet, though — it's staged on profile.pendingPlace so the
+  // frontend can ask "is this your business?" first; POST
+  // /api/profile/place/confirm (below) is what actually applies or
+  // discards it once the user answers.
   let placeResult;
   if (mapChanged && places.configured()) {
     placeResult = await places.enrichFromMapsLink(check.value);
     if (placeResult.ok) {
-      profile.placeInfo = placeResult.place;
-      if (!profile.business && placeResult.place.name) profile.business = placeResult.place.name;
-      if (placeResult.photos.length) profile.photos = profile.photos.concat(placeResult.photos);
+      profile.pendingPlace = { place: placeResult.place, photos: placeResult.photos, mapValue: check.value, savedAt: new Date().toISOString() };
       writeDB(db);
     }
   }
@@ -239,8 +241,30 @@ app.put('/api/profile/:field', requireAuth, async (req, res) => {
   res.json(Object.assign(
     profilePayload(profile),
     improvements ? { improvements } : {},
-    placeResult && placeResult.ok ? { placeInfo: placeResult.place, photosAdded: placeResult.photos.length } : {},
+    placeResult && placeResult.ok
+      ? { placeConfirmation: { summary: places.placeSummaryLine(placeResult.place), photosFound: placeResult.photos.length, pending: true } }
+      : {},
     placeResult && !placeResult.ok ? { placeError: placeResult.reason } : {}
+  ));
+});
+
+// Applies or discards a Google Business Profile match staged on
+// profile.pendingPlace (see the map-link handling above and in
+// server/chat.js) — the explicit "yes, that's my business" / "no" step
+// requested for BrixOS's map-link flow. Body: { confirm: boolean }.
+app.post('/api/profile/place/confirm', requireAuth, (req, res) => {
+  const confirm = Boolean((req.body || {}).confirm);
+  const db = readDB();
+  const profile = getProfile(db, req.session.userId);
+
+  if (!profile.pendingPlace) return res.status(400).json({ error: 'No pending business match to confirm.' });
+
+  const result = places.applyPendingPlace(profile, confirm);
+  writeDB(db);
+
+  res.json(Object.assign(
+    profilePayload(profile),
+    result.applied ? { placeInfo: result.place, photosAdded: result.photosAdded } : {}
   ));
 });
 

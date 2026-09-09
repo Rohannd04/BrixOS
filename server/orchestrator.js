@@ -46,6 +46,7 @@ const { planSiteLocal, profileBrief } = require('./generate');
 const {
   PALETTES,
   pickPalette,
+  pickLayout,
   collectPhotoDataUris,
   renderSitePage
 } = require('./siteTemplate');
@@ -268,6 +269,108 @@ async function stageStudy(job, profile, score) {
 }
 
 // ---------------------------------------------------------------------------
+// content safety — strip AI-authored meta-commentary about the site's OWN
+// state (e.g. the "Photos Needed for Refresh" bug: a model wrote a hero
+// that told the visitor it needed photos, instead of writing marketing
+// copy) before any such text ever reaches a rendered page. Prompt-level
+// instructions below tell the model not to do this, but a model can still
+// get it wrong — this regex backstop is the actual guarantee: it runs on
+// every section, from every path (initial plan AND every later "modify"
+// request), and swaps in safe generic copy for just the offending field(s)
+// rather than failing the whole job. Defense in depth, not a replacement
+// for the prompt instructions.
+// ---------------------------------------------------------------------------
+
+const META_COMMENTARY_RE = new RegExp(
+  [
+    'photos?\\s+(needed|required|missing|not\\s+(?:yet\\s+)?(?:uploaded|available|provided))',
+    'no\\s+(photos?|images?)\\s+(available|found|on file|yet|provided)',
+    'please\\s+(upload|provide|add)\\s',
+    'we\\s+need\\s+access\\s+to',
+    'need\\s+access\\s+to\\s+the\\s+(saved|business)',
+    'image\\s+urls?\\s+so\\s+(we|you)\\s+can',
+    'complete\\s+this\\s+refresh',
+    'saved\\s+business\\s+profile',
+    // Narrowed to the site/page ITSELF being unfinished, not a business's own
+    // "new arrivals coming soon" marketing copy — that phrase is completely
+    // normal, legitimate retail copy and must not be flagged.
+    '(this\\s+(page|section|site)|website|content)\\s+is\\s+(coming\\s+soon|under\\s+construction|not\\s+ready)',
+    'under\\s+construction',
+    'lorem\\s+ipsum',
+    '\\bTBD\\b',
+    'placeholder\\s+(text|copy|content|image)',
+    'this\\s+section\\s+will\\s+be',
+    'content\\s+coming\\s+soon'
+  ].join('|'),
+  'i'
+);
+
+function hasMetaCommentary(text) {
+  return typeof text === 'string' && META_COMMENTARY_RE.test(text);
+}
+
+// Safe, generic-but-real fallback copy for a section whose AI-authored
+// text tripped the check above — keyed by section type, personalized with
+// whatever real profile facts are on hand so it never reads as a stock
+// placeholder itself.
+function fallbackCopyForType(type, profile) {
+  const name = (profile && profile.business) || 'This business';
+  const category = (profile && profile.placeInfo && profile.placeInfo.category) ||
+    (profile && profile.category) || 'local business';
+  switch (type) {
+    case 'hero':
+      return {
+        headline: `${name} — Quality You Can Count On`,
+        body: `${name} is a ${category} dedicated to serving customers with care and consistency, every visit.`,
+        cta: 'Get in Touch'
+      };
+    case 'gallery':
+    case 'products':
+      return {
+        headline: 'A Look at What We Offer',
+        body: `Here's a look at what makes ${name} worth a visit.`,
+        cta: 'View More'
+      };
+    case 'about':
+      return {
+        headline: `About ${name}`,
+        body: `${name} is committed to delivering a great experience for every customer, every time.`,
+        cta: 'Learn More'
+      };
+    case 'contact':
+      return {
+        headline: 'Get in Touch',
+        body: `Reach out to ${name} — we'd love to hear from you.`,
+        cta: 'Contact Us'
+      };
+    default:
+      return {
+        headline: `Discover ${name}`,
+        body: `${name} is here to help — reach out to learn more about what we offer.`,
+        cta: 'Contact Us'
+      };
+  }
+}
+
+function sanitizeSection(section, profile) {
+  if (!section || typeof section !== 'object') return section;
+  const badHeadline = hasMetaCommentary(section.headline);
+  const badBody = hasMetaCommentary(section.body);
+  const badCta = hasMetaCommentary(section.cta);
+  if (!badHeadline && !badBody && !badCta) return section;
+  const fallback = fallbackCopyForType(section.type, profile);
+  return Object.assign({}, section, {
+    headline: badHeadline ? fallback.headline : section.headline,
+    body: badBody ? fallback.body : section.body,
+    cta: badCta ? fallback.cta : (section.cta || fallback.cta)
+  });
+}
+
+function sanitizeSections(sections, profile) {
+  return Array.isArray(sections) ? sections.map((s) => sanitizeSection(s, profile)) : sections;
+}
+
+// ---------------------------------------------------------------------------
 // stage: PLANNING
 // ---------------------------------------------------------------------------
 
@@ -282,6 +385,7 @@ function normalizePlan(raw, profile) {
     while (seen.has(p.slug)) p.slug += '-2';
     seen.add(p.slug);
     p.nav_label = p.nav_label || p.title || p.slug;
+    p.sections = sanitizeSections(p.sections, profile);
   });
   if (!pages.some((p) => p.slug === 'index')) pages[0].slug = 'index';
 
@@ -357,7 +461,12 @@ async function stagePlan(job, profile, score, study, reasoning) {
           'headline = "Furnished PG for Gents in Bangalore — 3 Meals a Day", body = "Safe, all-inclusive stay so you ' +
           'can focus on work.", cta = "Call to Book". Do NOT write something like headline = "Your All-Inclusive PG ' +
           'in Bangalore" with body = "Hero headline: \'Furnished PG for Gents...\'. Subline: \'Safe, all-inclusive ' +
-          'stay...\'. CTA: \'Call to Book\'." — that meta-description format is wrong and must never appear. Always ' +
+          'stay...\'. CTA: \'Call to Book\'." — that meta-description format is wrong and must never appear. Never ' +
+          'write copy that comments on the website\'s OWN state or on BrixOS\'s process — never say photos are ' +
+          'needed, missing, or "coming soon"; never ask the user to upload, provide, or paste anything; never say ' +
+          '"under construction" or use placeholder text like "TBD". If photos are missing, simply write copy that ' +
+          'does not depend on photos being present — the template already renders a graceful placeholder graphic ' +
+          'automatically, so your job is only ever to write genuine, ready-to-publish marketing copy. Always ' +
           'call submit_orchestrator_plan exactly once.',
         userText: 'Here is everything currently known about this business:\n\n' + study.brief + '\n\nPlan its rebuilt website now.',
         tools: [ORCHESTRATOR_PLAN_TOOL],
@@ -402,17 +511,17 @@ function stageArchitect(job, plan) {
 // template can't return a dud response, and it always passes validatePage()
 // by construction (real doctype/title/viewport, every planned headline
 // literally present), so there's no FIX-loop left to run here.
-function buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug) {
-  return renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, photos });
+function buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug, layoutId) {
+  return renderSitePage({ task, plan, profile, allTasks, palette, homeSlug, photos, layoutId });
 }
 
-function stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug) {
+function stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug, layoutId) {
   logStage(job, 'GENERATING', 'Generating your pages…');
   const pages = {};
   const models = {};
 
   tasks.forEach((task) => {
-    const html = buildPageHtml(task, plan, profile, tasks, palette, photos, homeSlug);
+    const html = buildPageHtml(task, plan, profile, tasks, palette, photos, homeSlug, layoutId);
     const result = validatePage(html, task);
     if (!result.ok) {
       // Should be unreachable with a deterministic template — kept as a
@@ -511,13 +620,20 @@ async function runJob(job) {
     // the business_understanding wording changes on a re-plan).
     const palette = pickPalette(profile, plan);
     plan.design_system.paletteId = palette.id;
+    // Structural layout variant — a second, deterministically-picked
+    // template beyond the single hand-crafted layout (see
+    // siteTemplate.js's pickLayout), persisted here for the same reason
+    // paletteId is: so a later "modify" job never reshuffles a project's
+    // structure out from under it.
+    const layout = pickLayout(palette);
+    plan.design_system.layoutId = layout.id;
     const photos = collectPhotoDataUris(profile);
     job.plan = plan;
 
     const tasks = stageArchitect(job, plan);
     const homeSlug = plan.pages.some((p) => p.slug === 'index') ? 'index' : plan.pages[0].slug;
-    const { pages, models, projectWarnings } = stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug);
-    job.builderModel = `template:${palette.id}`;
+    const { pages, models, projectWarnings } = stageGenerateValidateFix(job, tasks, plan, profile, palette, photos, homeSlug, layout.id);
+    job.builderModel = `template:${palette.id}:${layout.id}`;
 
     stagePreview(job, profile, db, plan, pages, models);
     job.pages = pages;
@@ -582,7 +698,9 @@ async function runModifyJob(job, instruction) {
             'unrelated sections as they are, only change what the user asked for. Every section\'s headline/body/cta ' +
             'must be the FINAL, literal text to display on the page, ready to publish as-is — never a description ' +
             'of what that text should say (e.g. never write something like "Headline: \'...\' Subline: \'...\' CTA: ' +
-            '\'...\'"). Call submit_page_update exactly once.',
+            '\'...\'"). Never write copy that comments on the website\'s own state or on BrixOS\'s process — never ' +
+            'say photos are needed/missing/"coming soon", never ask the user to upload or provide content, never ' +
+            'say "under construction". Call submit_page_update exactly once.',
           userText:
             'Existing pages: ' + plan.pages.map((p) => `${p.slug} (sections: ${p.sections.map((s) => s.headline).join(', ')})`).join(' | ') +
             '\n\nUser\'s request: ' + instruction,
@@ -609,6 +727,7 @@ async function runModifyJob(job, instruction) {
       job.log.push({ stage: 'PLANNING', message: 'No AI reasoning provider available — added your request as a plain note instead of rewriting the page.', at: new Date().toISOString() });
     }
 
+    updatedSections = sanitizeSections(updatedSections, profile);
     const targetPageIndex = plan.pages.findIndex((p) => p.slug === targetSlug);
     plan.pages[targetPageIndex] = Object.assign({}, plan.pages[targetPageIndex], { sections: updatedSections });
 
@@ -621,10 +740,11 @@ async function runModifyJob(job, instruction) {
     // re-deriving it, so a copy tweak never accidentally reshuffles the
     // whole site's visual identity.
     const palette = PALETTES[plan.design_system && plan.design_system.paletteId] || pickPalette(profile, plan);
+    const layoutId = (plan.design_system && plan.design_system.layoutId) || pickLayout(palette).id;
     const photos = collectPhotoDataUris(profile);
 
     logStage(job, 'GENERATING', `Updating "${task.title}"…`);
-    const html = buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug);
+    const html = buildPageHtml(task, plan, profile, allTasks, palette, photos, homeSlug, layoutId);
     const result = validatePage(html, task);
     if (!result.ok) {
       job.log.push({ stage: 'VALIDATING', message: `"${task.title}" has unexpected structural issues: ${result.errors.join(' ')}`, at: new Date().toISOString() });

@@ -178,16 +178,17 @@
   // styles.css.
   // ===========================================================================
   var workspaceView = $('workspaceView');
+  var workspaceGrid = $('workspaceGrid');
   var workspaceLeft = $('workspaceLeft');
   var workspaceRight = $('workspaceRight');
   var previewCard = $('previewCard');
   var consoleEl = document.querySelector('.console');
   var wsScore = $('wsScore');
+  var wsImprove = $('wsImprove');
   var wsScoreNum = $('wsScoreNum');
   var wsScoreTitle = $('wsScoreTitle');
   var wsScoreStatus = $('wsScoreStatus');
   var wsRingFill = $('wsRingFill');
-  var wsImprove = $('wsImprove');
   var wsImproveTags = $('wsImproveTags');
   var WS_RING_CIRC = 2 * Math.PI * 24;
   var DIMENSION_LABELS = {
@@ -200,19 +201,41 @@
     content: 'Content and freshness'
   };
   var inWorkspace = false;
+  var previewActive = false; // becomes true only once a generation job actually starts — see activatePreviewPanel()
 
   function enterWorkspaceMode() {
     if (inWorkspace) return;
     inWorkspace = true;
     document.body.classList.add('is-workspace');
     wsScore.hidden = false;
-    // move the REAL console/chat and preview card in — same elements, same
-    // listeners and state, just relocated — not copies.
+    // move the REAL console/chat in — same element, same listeners and
+    // state, just relocated — not a copy. Appended in this exact order
+    // (chat, then the improve-tags box) so "sections to improve" always
+    // renders BELOW the chat log, never above it.
     workspaceLeft.appendChild(consoleEl);
-    workspaceRight.appendChild(previewCard);
+    workspaceLeft.appendChild(wsImprove);
     workspaceView.hidden = false;
     workspaceView.classList.add('is-active');
     renderScoreUI();
+
+    // If a site was already generated in an earlier session (profile
+    // loaded on boot), show it immediately rather than making the user
+    // re-trigger a generation just to see what already exists.
+    if (state.profile && state.profile.generatedSite) activatePreviewPanel();
+  }
+
+  // The right-hand "Generated preview" column has no grid track reserved
+  // for it at all until this runs — it is not merely hidden, it isn't part
+  // of the layout — so it can never be visible while nothing is
+  // generating (request: preview should only appear once generation
+  // actually starts). Call this the moment a generation/modify job is
+  // actually kicked off (see generateSite() and runChatTurn() below).
+  function activatePreviewPanel() {
+    if (previewActive) return;
+    previewActive = true;
+    workspaceRight.appendChild(previewCard);
+    workspaceRight.hidden = false;
+    workspaceGrid.classList.add('has-preview');
   }
 
   // The compact score ring now sits above chat while the full 7-metric
@@ -418,6 +441,20 @@
             var text = 'Studied your site — presence score is ' + data.score.overall + '/100. ' +
               "Here's what I'd fix first: " + data.improvements.slice(0, 3).join(' ');
             appendChatBubble('assistant', text);
+          }
+
+          // A map link resolved to a real Google Business Profile match, but
+          // it's only staged (never applied silently) — ask the user to
+          // confirm right here in the chat log; typing "yes"/"no" in the
+          // console below resolves it (see server/chat.js).
+          if (data.placeConfirmation) {
+            enterWorkspaceMode();
+            appendChatBubble('assistant', 'Found a Google listing that might be yours — ' + data.placeConfirmation.summary +
+              (data.placeConfirmation.photosFound ? ' (' + data.placeConfirmation.photosFound + ' photo' + (data.placeConfirmation.photosFound > 1 ? 's' : '') + ' available).' : '.') +
+              ' Is this your business? Reply yes or no in the chat below.');
+          }
+          if (data.placeError) {
+            toast('Couldn\'t verify that map link: ' + data.placeError, true);
           }
         })
         .catch(function (err) { showFieldError(id, err.message); });
@@ -847,6 +884,7 @@
         // the "Generate my site" button uses, so it doesn't matter which
         // entry point the user used.
         if (data.orchestratorJobId) {
+          activatePreviewPanel();
           setOrchestratorBusy(true);
           showOrchestratorStatus({ status: 'QUEUED' });
           pollOrchestratorJob(data.orchestratorJobId);
@@ -1019,6 +1057,7 @@
     if (orchestratorBusy) return;
 
     enterWorkspaceMode();
+    activatePreviewPanel();
     setOrchestratorBusy(true);
     showOrchestratorStatus({ status: 'QUEUED' });
 
